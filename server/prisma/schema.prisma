@@ -1,0 +1,51 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id                  String       @id @default(uuid())
+  email               String       @unique
+  authHash            String       // bcrypt hash of SHA-256(Key A) — never sees plaintext master password
+  salt                String       // Argon2id salt for client-side key re-derivation
+  encryptedKeyB       String?      // Key B encrypted with recovery key — enables master password reset
+  totpSecret          String?      // TOTP secret for 2FA (encrypted at rest)
+  totpEnabled         Boolean      @default(false)
+  refreshToken        String?      // Hashed refresh token for session rotation
+  emailVerified       Boolean      @default(false)
+  verificationToken   String?      // Email verification token
+  verificationExpiry  DateTime?    // Expiry for verification token
+  failedAttempts      Int          @default(0)
+  lockedUntil         DateTime?    // Account lockout timestamp
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  vaultEntries        VaultEntry[]
+
+  @@map("users")
+}
+
+model VaultEntry {
+  id              String   @id @default(uuid())
+  userId          String
+  encryptedData   String   // AES-256-GCM ciphertext — contains service, username, password, notes, etc.
+  iv              String   // Initialization vector for AES-GCM
+  tag             String   // GCM authentication tag — ensures ciphertext integrity
+  category        String   @default("general") // Plaintext category for server-side filtering (metadata trade-off)
+  url             String?  // Service URL — stored for future browser extension autofill matching
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("vault_entries")
+}
