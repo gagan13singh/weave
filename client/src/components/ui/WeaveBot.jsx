@@ -208,7 +208,12 @@ export const WeaveBot = ({ entries, onEditEntry }) => {
                         }}
                       >
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontWeight: 600, fontSize: '12px' }}>{match.serviceName}</span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <div style={{ width: '24px', height: '24px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-default)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, overflow: 'hidden' }}>
+                              <ServiceLogo name={match.serviceName} url={match.url} category={match.category} size={14} />
+                            </div>
+                            <span style={{ fontWeight: 600, fontSize: '12px' }}>{match.serviceName}</span>
+                          </div>
                           <span className={`category-badge ${match.category.toLowerCase()}`} style={{ fontSize: '8px', padding: '1px 6px' }}>
                             {match.category}
                           </span>
@@ -375,3 +380,104 @@ export const WeaveBot = ({ entries, onEditEntry }) => {
     </div>
   );
 };
+
+// ─── SERVICE LOGO COMPONENT ─────────────────────────────────
+
+const extractDomain = (str = '') => {
+  let text = str.trim().toLowerCase();
+  
+  // Remove protocol and port
+  text = text.replace(/^(https?:\/\/)?(www\.)?/, '');
+  text = text.split('/')[0];
+  text = text.split(':')[0]; // remove port
+  
+  if (text.includes('.') && !text.includes(' ') && text.length > 3) {
+    const parts = text.split('.');
+    if (parts.length >= 2) {
+      const tld = parts[parts.length - 1];
+      const sld = parts[parts.length - 2];
+      const countryCodes = ['co', 'com', 'org', 'net', 'edu', 'gov', 'in', 'us', 'uk', 'ca', 'cn', 'jp'];
+      if (parts.length > 2 && countryCodes.includes(sld) && countryCodes.includes(tld)) {
+        return parts.slice(-3).join('.');
+      }
+      return parts.slice(-2).join('.');
+    }
+    return text;
+  }
+  return null;
+};
+
+const getServiceLogoUrl = (name = '', url = '') => {
+  let domain = extractDomain(url);
+  
+  if (!domain) {
+    domain = extractDomain(name);
+  }
+  
+  if (!domain && name) {
+    const match = name.toLowerCase().trim();
+    if (match.includes('google')) domain = 'google.com';
+    else if (match.includes('github')) domain = 'github.com';
+    else if (match.includes('microsoft') || match.includes('azure') || match.includes('outlook')) domain = 'microsoft.com';
+    else if (match.includes('netflix')) domain = 'netflix.com';
+    else if (match.includes('spotify')) domain = 'spotify.com';
+    else if (match.includes('amazon')) domain = 'amazon.com';
+    else if (match.includes('zoom')) domain = 'zoom.us';
+    else if (match.includes('facebook')) domain = 'facebook.com';
+    else if (match.includes('twitter') || match.includes(' x ')) domain = 'twitter.com';
+    else if (match.includes('linkedin')) domain = 'linkedin.com';
+  }
+  
+  if (domain && domain !== 'localhost' && domain.includes('.')) {
+    return `https://www.google.com/s2/favicons?sz=128&domain=${domain}`;
+  }
+  return null;
+};
+
+const ServiceLogo = ({ name, url, category, size = 18 }) => {
+  const [imgFailed, setImgFailed] = useState(false);
+  const logoUrl = getServiceLogoUrl(name, url);
+
+  if (logoUrl && !imgFailed) {
+    return (
+      <img 
+        src={logoUrl} 
+        alt={name} 
+        onError={() => setImgFailed(true)} 
+        style={{ width: `${size}px`, height: `${size}px`, borderRadius: '4px', objectFit: 'contain', display: 'block' }}
+      />
+    );
+  }
+
+  const colors = {
+    general: '#8b7cf7',
+    work: '#60a5fa',
+    personal: '#34d399',
+    banking: '#fbbf24',
+    social: '#f87171',
+    development: '#a78bfa',
+    shopping: '#22d3ee',
+  };
+  const bg = colors[category] || '#8b7cf7';
+  const initial = (name || '?')[0].toUpperCase();
+
+  return (
+    <div style={{
+      width: '100%',
+      height: '100%',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: bg,
+      color: '#ffffff',
+      fontSize: size <= 14 ? '9px' : '12px',
+      fontWeight: 700,
+      borderRadius: '4px',
+      textShadow: '0 1px 2px rgba(0,0,0,0.2)'
+    }}>
+      {initial}
+    </div>
+  );
+};
+
+export default WeaveBot;

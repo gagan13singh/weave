@@ -65,6 +65,90 @@ export const checkPasswordReuse = (password, vaultEntries, excludeId) => {
 };
 
 /**
+ * Levenshtein distance — O(n*m) DP, pure client-side.
+ * Measures the minimum number of single-character edits
+ * (insertions, deletions, substitutions) to transform one string into another.
+ * 
+ * Used for weak-variation reuse detection (e.g., "Sajjan@123" vs "Sajjan@124").
+ * Runs entirely in browser memory — passwords are never sent anywhere.
+ */
+export const levenshteinDistance = (a, b) => {
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  const matrix = [];
+
+  for (let i = 0; i <= b.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= a.length; j++) {
+    matrix[0][j] = j;
+  }
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      const cost = b[i - 1] === a[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,      // deletion
+        matrix[i][j - 1] + 1,      // insertion
+        matrix[i - 1][j - 1] + cost // substitution
+      );
+    }
+  }
+
+  return matrix[b.length][a.length];
+};
+
+/**
+ * Find passwords that are weak variations of each other.
+ * 
+ * Catches patterns like:
+ * - Summer2024! vs Summer2025!  (digit change)
+ * - Sajjan@123 vs Sajjan@124    (increment)
+ * - password123 vs Password123  (case change)
+ * 
+ * Normalized similarity = 1 - (distance / max(len_a, len_b))
+ * Threshold of 0.65 catches 1-3 character variations in typical passwords.
+ * 
+ * @param {Array} entries - Decrypted vault entries with passwords
+ * @param {number} threshold - Similarity threshold (0-1), default 0.65
+ * @returns {Array<{ entryA: Object, entryB: Object, similarity: number }>}
+ */
+export const findSimilarPasswords = (entries, threshold = 0.65) => {
+  const pairs = [];
+  const withPasswords = entries.filter(e => e.password && e.password.length >= 4);
+
+  for (let i = 0; i < withPasswords.length; i++) {
+    for (let j = i + 1; j < withPasswords.length; j++) {
+      const a = withPasswords[i].password;
+      const b = withPasswords[j].password;
+
+      // Skip exact matches (already caught by checkPasswordReuse)
+      if (a === b) continue;
+
+      // Skip if lengths differ by more than 40% (unlikely to be variations)
+      if (Math.abs(a.length - b.length) / Math.max(a.length, b.length) > 0.4) continue;
+
+      const distance = levenshteinDistance(a, b);
+      const maxLen = Math.max(a.length, b.length);
+      const similarity = 1 - (distance / maxLen);
+
+      if (similarity >= threshold) {
+        pairs.push({
+          entryA: withPasswords[i],
+          entryB: withPasswords[j],
+          similarity: Math.round(similarity * 100),
+        });
+      }
+    }
+  }
+
+  // Sort by similarity descending
+  pairs.sort((a, b) => b.similarity - a.similarity);
+  return pairs;
+};
+
+/**
  * Validate email format.
  */
 export const isValidEmail = (email) => {

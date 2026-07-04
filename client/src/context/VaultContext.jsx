@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import api from '../lib/api';
-import { encrypt, decrypt } from '../lib/crypto';
+import { encrypt, decrypt, deriveKeys } from '../lib/crypto';
 import { useAuthContext } from './AuthContext';
 import { generatePassword } from '../lib/validators';
 import toast from 'react-hot-toast';
@@ -20,6 +20,15 @@ export const VaultProvider = ({ children }) => {
   const [loading, setLoading] = useState(false);
   const [activeCategory, setActiveCategory] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [verifyToken, setVerifyToken] = useState(null);
+
+  useEffect(() => {
+    if (keyB) {
+      encrypt({ check: 'valid' }, keyB).then(token => {
+        setVerifyToken(token);
+      });
+    }
+  }, [keyB]);
 
 
   // ─── FETCH & DECRYPT ──────────────────────────────────
@@ -30,7 +39,7 @@ export const VaultProvider = ({ children }) => {
     setLoading(true);
     try {
       const { data } = await api.get('/vault', {
-        params: activeCategory !== 'all' ? { category: activeCategory } : {},
+        params: (activeCategory !== 'all' && activeCategory !== 'checkup') ? { category: activeCategory } : {},
       });
 
       setEntries(data);
@@ -132,7 +141,8 @@ export const VaultProvider = ({ children }) => {
   const updateEntry = useCallback(async (entryId, entryData) => {
     if (!keyB) throw new Error('Vault is locked');
 
-    const { category, url, ...plaintextData } = entryData;
+    // Strip metadata to avoid polluting encrypted data payload
+    const { id, createdAt, updatedAt, userId, category, url, ...plaintextData } = entryData;
 
     const { ciphertext, iv, tag } = await encrypt(plaintextData, keyB);
 
@@ -147,6 +157,20 @@ export const VaultProvider = ({ children }) => {
     await fetchEntries();
     return data;
   }, [keyB, fetchEntries]);
+
+  // ─── VERIFY PASSWORD ───────────────────────────────────
+
+  const verifyMasterPassword = useCallback(async (enteredPassword) => {
+    if (!verifyToken || !user) return false;
+    try {
+      const { data } = await api.get('/auth/salt', { params: { email: user.email } });
+      const { keyB: testKeyB } = await deriveKeys(enteredPassword, data.salt);
+      const decrypted = await decrypt(verifyToken.ciphertext, verifyToken.iv, verifyToken.tag, testKeyB);
+      return decrypted && decrypted.check === 'valid';
+    } catch (e) {
+      return false;
+    }
+  }, [verifyToken, user]);
 
   // ─── DELETE ────────────────────────────────────────────
 
@@ -205,6 +229,7 @@ export const VaultProvider = ({ children }) => {
     updateEntry,
     deleteEntry,
     fetchEntries,
+    verifyMasterPassword,
   };
 
   return <VaultContext.Provider value={value}>{children}</VaultContext.Provider>;

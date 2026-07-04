@@ -17,18 +17,18 @@
 }
 
 :root {
-  /* Colors - Strictly aligned to Weave logo colors */
-  --bg-primary: #0a0a12;       /* Logo base dark background */
-  --bg-secondary: #06060c;     /* Contrasting darker panels */
-  --bg-tertiary: #11111e;      /* Cards & active overlays */
-  --bg-input: #040408;         /* Inside inputs background */
-  --bg-hover: rgba(139, 124, 247, 0.05);
-  --bg-active: rgba(139, 124, 247, 0.12);
+  /* Colors - Obsidian Space Theme */
+  --bg-primary: #030307;       /* Obsidian depth background */
+  --bg-secondary: #07070e;     /* Contrasting darker panels */
+  --bg-tertiary: #0d0d18;      /* Cards & active overlays */
+  --bg-input: #040409;         /* Inside inputs background */
+  --bg-hover: rgba(139, 124, 247, 0.06);
+  --bg-active: rgba(139, 124, 247, 0.14);
 
   /* Borders */
-  --border-default: rgba(208, 208, 224, 0.08);
-  --border-hover: rgba(208, 208, 224, 0.16);
-  --border-active: rgba(208, 208, 224, 0.25);
+  --border-default: rgba(255, 255, 255, 0.04);
+  --border-hover: rgba(255, 255, 255, 0.08);
+  --border-active: rgba(255, 255, 255, 0.15);
   --border-focus: #8b7cf7;      /* Logo light purple */
 
   /* Typography Colors */
@@ -246,16 +246,16 @@ select:-webkit-autofill:focus {
 .auth-card {
   width: 100%;
   max-width: 440px;
-  background: rgba(6, 6, 12, 0.75);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(3, 3, 7, 0.65);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
   border-radius: var(--radius-lg);
   padding: var(--space-10) var(--space-8);
   /* Top highlighting ring shadow and deep bottom shadow */
   box-shadow: 
-    0 30px 60px rgba(0, 0, 0, 0.6),
-    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+    0 30px 60px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
   position: relative;
   z-index: 1;
   animation: scaleIn var(--transition-slow) forwards;
@@ -711,22 +711,27 @@ select:-webkit-autofill:focus {
 }
 
 .vault-card {
-  background: var(--bg-secondary);
+  background: rgba(255, 255, 255, 0.015);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: var(--space-5) var(--space-6);
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
   display: flex;
   align-items: center;
   gap: var(--space-5);
   opacity: 0;
   animation: slideIn var(--transition-fast) forwards;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
 }
 
 .vault-card:hover {
-  border-color: var(--border-hover);
-  background: var(--bg-tertiary);
+  border-color: rgba(139, 124, 247, 0.25);
+  background: rgba(139, 124, 247, 0.03);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transform: translateY(-2px);
 }
 
 .vault-card-icon {
@@ -784,20 +789,27 @@ select:-webkit-autofill:focus {
   padding: 2px 10px;
   border-radius: var(--radius-full);
   font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-weight: 700;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-default);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   color: var(--text-secondary);
 }
 
-.category-badge.work { color: #60a5fa; }
-.category-badge.personal { color: #34d399; }
-.category-badge.banking { color: #fbbf24; }
-.category-badge.social { color: #f87171; }
-.category-badge.development { color: #a78bfa; }
-.category-badge.shopping { color: #22d3ee; }
+.category-badge.work { color: #60a5fa; background: rgba(96, 165, 250, 0.08); border-color: rgba(96, 165, 250, 0.15); }
+.category-badge.personal { color: #34d399; background: rgba(52, 211, 153, 0.08); border-color: rgba(52, 211, 153, 0.15); }
+.category-badge.banking { color: #fbbf24; background: rgba(251, 191, 36, 0.08); border-color: rgba(251, 191, 36, 0.15); }
+.category-badge.social { color: #f87171; background: rgba(248, 113, 113, 0.08); border-color: rgba(248, 113, 113, 0.15); }
+.category-badge.development { color: #a78bfa; background: rgba(167, 139, 250, 0.08); border-color: rgba(167, 139, 250, 0.15); }
+.category-badge.shopping { color: #22d3ee; background: rgba(34, 211, 238, 0.08); border-color: rgba(34, 211, 238, 0.15); }
+.category-badge.general { color: #d0d0e0; background: rgba(208, 208, 224, 0.08); border-color: rgba(208, 208, 224, 0.15); }
+
+.vault-card-icon svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
 
 /* ─── MINIMAL STRENGTH METER ────────────────────────────── */
 
@@ -1109,4 +1121,15 @@ select:-webkit-autofill:focus {
   .auth-card {
     padding: var(--space-6);
   }
+}
+
+.hover-glow-card {
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+.hover-glow-card:hover {
+  border-color: rgba(139, 124, 247, 0.3) !important;
+  background: rgba(139, 124, 247, 0.03) !important;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
+  transform: translateY(-2px);
 }

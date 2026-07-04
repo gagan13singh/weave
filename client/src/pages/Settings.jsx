@@ -17,7 +17,7 @@ import {
 
 const Settings = () => {
   const { user, logout } = useAuthContext();
-  const { allEntries } = useVaultContext();
+  const { allEntries, createEntry } = useVaultContext();
   const navigate = useNavigate();
 
   // 2FA state
@@ -204,6 +204,138 @@ const Settings = () => {
       toast.error('Failed to regenerate recovery key. Please check your password.');
     } finally {
       setRegenerateLoading(false);
+    }
+  };
+
+  const [importing, setImporting] = useState(false);
+
+  const handleCsvImport = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setImporting(true);
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        const text = evt.target.result;
+        const lines = text.split(/\r?\n/);
+        if (lines.length < 2) {
+          toast.error('CSV file is empty');
+          setImporting(false);
+          return;
+        }
+
+        const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/^"|"$/g, ''));
+        const nameIdx = headers.findIndex(h => h.includes('name') || h.includes('title'));
+        const urlIdx = headers.findIndex(h => h.includes('url') || h.includes('website'));
+        const userIdx = headers.findIndex(h => h.includes('username') || h.includes('user') || h.includes('email'));
+        const passIdx = headers.findIndex(h => h.includes('password') || h.includes('pass'));
+        const notesIdx = headers.findIndex(h => h.includes('note') || h.includes('desc'));
+
+        if (nameIdx === -1 || passIdx === -1) {
+          toast.error('CSV must contain name/title and password columns');
+          setImporting(false);
+          return;
+        }
+
+        let count = 0;
+        let skipped = 0;
+        let errors = 0;
+        const duplicateNames = [];
+
+        for (let i = 1; i < lines.length; i++) {
+          try {
+            const line = lines[i].trim();
+            if (!line) continue;
+            
+            const cells = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.trim().replace(/^"|"$/g, ''));
+            if (cells.length <= Math.max(nameIdx, passIdx)) continue;
+
+            const name = cells[nameIdx];
+            const password = cells[passIdx];
+            if (!name || !password) continue;
+
+            const url = urlIdx !== -1 ? cells[urlIdx] : '';
+            const username = userIdx !== -1 ? cells[userIdx] : '';
+
+            // Check if exact duplicate already exists in the local vault
+            const exists = allEntries.find(
+              e => e.serviceName.toLowerCase().trim() === name.toLowerCase().trim() &&
+                   (e.username || '').toLowerCase().trim() === (username || '').toLowerCase().trim()
+            );
+
+            if (exists) {
+              if (exists.password === password) {
+                skipped++;
+                duplicateNames.push(name);
+                continue; // Skip exact matches to avoid cluttering
+              }
+            }
+
+            const notes = notesIdx !== -1 ? cells[notesIdx] : 'Imported via CSV';
+
+            await createEntry({
+              serviceName: name,
+              username,
+              password,
+              url,
+              category: 'general',
+              notes
+            });
+            count++;
+          } catch (rowErr) {
+            errors++;
+            console.error(`CSV row parsing issue at index ${i}:`, rowErr);
+          }
+        }
+        if (skipped > 0) {
+          const namesStr = duplicateNames.slice(0, 5).join(', ');
+          const overflow = duplicateNames.length > 5 ? ` and ${duplicateNames.length - 5} more` : '';
+          toast.success(`Successfully imported ${count} credentials. Skipped duplicates found for: ${namesStr}${overflow}.`, { duration: 7000 });
+        } else {
+          toast.success(`Successfully imported ${count} credentials from CSV!`);
+        }
+        if (errors > 0) {
+          toast.error(`Warning: Skipped ${errors} unparseable lines.`);
+        }
+      } catch (err) {
+        toast.error('Failed to parse CSV file');
+      } finally {
+        setImporting(false);
+        e.target.value = '';
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleExportCsv = () => {
+    try {
+      const headers = ['name', 'url', 'username', 'password', 'notes', 'category'];
+      const csvRows = [headers.join(',')];
+
+      for (const entry of allEntries) {
+        const row = [
+          `"${(entry.serviceName || '').replace(/"/g, '""')}"`,
+          `"${(entry.url || '').replace(/"/g, '""')}"`,
+          `"${(entry.username || '').replace(/"/g, '""')}"`,
+          `"${(entry.password || '').replace(/"/g, '""')}"`,
+          `"${(entry.notes || '').replace(/"/g, '""')}"`,
+          `"${(entry.category || '').replace(/"/g, '""')}"`
+        ];
+        csvRows.push(row.join(','));
+      }
+
+      const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.setAttribute('href', url);
+      link.setAttribute('download', `weave_vault_export.csv`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      toast.success('Vault exported to CSV successfully!');
+    } catch (err) {
+      toast.error('Failed to export vault');
     }
   };
 
@@ -469,6 +601,29 @@ const Settings = () => {
                 {regenerateLoading ? 'Generating...' : 'Generate New Recovery Key'}
               </button>
             )}
+          </div>
+
+          {/* Import / Export Vault */}
+          <div className="settings-section">
+            <h3 className="settings-section-title">📥 Import / Export Data</h3>
+            <p className="settings-section-desc">
+              Import credentials directly from your browser's Google Chrome CSV export file, or export your decrypted vault safely as a local backup.
+            </p>
+            <div style={{ display: 'flex', gap: 'var(--space-3)', marginTop: 'var(--space-4)' }}>
+              <label className="btn btn-secondary" style={{ cursor: 'pointer', margin: 0, display: 'inline-flex', alignItems: 'center' }}>
+                {importing ? 'Importing CSV...' : '📂 Import CSV File'}
+                <input 
+                  type="file" 
+                  accept=".csv" 
+                  onChange={handleCsvImport} 
+                  disabled={importing} 
+                  style={{ display: 'none' }} 
+                />
+              </label>
+              <button className="btn btn-secondary" onClick={handleExportCsv} disabled={allEntries.length === 0}>
+                💾 Export Vault to CSV
+              </button>
+            </div>
           </div>
 
           {/* Danger Zone */}
