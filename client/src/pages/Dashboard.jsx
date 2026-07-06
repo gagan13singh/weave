@@ -7,6 +7,8 @@ import { analyzePassword, checkPasswordReuse, generatePassword, findSimilarPassw
 import { buildRecoveryGraph, blastRadiusBFS, computeDegreeCentrality, generatePanicPlan } from '../lib/graphEngine';
 import { semanticSearch } from '../lib/nlSearch';
 import { encryptVaultForTransfer, decryptVaultTransfer, generateTransferPIN } from '../lib/vaultTransfer';
+import { getAccountType, getTierLabel, computeAccountHealthScore, getHealthScoreDisplay, ACCOUNT_TYPES } from '../lib/accountTypes';
+import { checkPasswordBreach } from '../lib/hibp';
 import QRCode from 'qrcode';
 import toast from 'react-hot-toast';
 import { WeaveBot } from '../components/ui/WeaveBot';
@@ -204,7 +206,7 @@ const Dashboard = () => {
               onClick={() => setShowDiscoverModal(true)}
               style={{ display: 'flex', gap: '6px', alignItems: 'center' }}
             >
-              ⚡ AI Auto-Discover
+              ⚡ Smart Import
             </button>
             <button
               className="btn btn-primary"
@@ -287,13 +289,15 @@ const Dashboard = () => {
               </div>
             );
 
-            return (
-            <div className="vault-grid">
-              {displayEntries.map((entry, index) => (
+            const renderCard = (entry, index) => {
+              const accountType = getAccountType(entry.serviceName);
+              const brandColor = accountType?.brandColor || 'rgba(255, 255, 255, 0.05)';
+              return (
                 <div
                   key={entry.id}
                   className={`vault-card stagger-${Math.min(index + 1, 5)}`}
                   onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)}
+                  style={{ borderLeft: `3px solid ${brandColor}` }}
                 >
                   <div className="vault-card-icon" style={{ padding: 0, overflow: 'hidden' }}>
                     <ServiceLogo name={entry.serviceName} url={entry.url} category={entry.category} />
@@ -426,7 +430,7 @@ const Dashboard = () => {
                             (d) => new Date(entry.createdAt) >= new Date(d.createdAt)
                           );
                           const counterpart = duplicates[0];
-
+  
                           return (
                             <div 
                               style={{ 
@@ -485,7 +489,7 @@ const Dashboard = () => {
                             </div>
                           );
                         })()}
-
+  
                         {/* Weave Smart Suggestions Box */}
                         {(() => {
                           const suggestions = analyzeCredentialSuggestions(entry);
@@ -605,8 +609,47 @@ const Dashboard = () => {
                     </div>
                   </div>
                 </div>
-              ))}
-            </div>
+              );
+            };
+  
+            if (activeCategory === 'all' && (!searchQuery || !searchQuery.trim())) {
+              const t1 = displayEntries.filter(e => { const t = getAccountType(e.serviceName); return t?.tier === 1 || t?.isIdentityAnchor; });
+              const t2 = displayEntries.filter(e => { const t = getAccountType(e.serviceName); return t?.tier === 2 && !t?.isIdentityAnchor; });
+              const t3 = displayEntries.filter(e => { const t = getAccountType(e.serviceName); return !t || t?.tier === 3; });
+  
+              const groups = [
+                { title: '🔑 Tier 1: Core Identity Anchors', desc: 'Critical accounts that control access/recovery of other accounts (e.g. Gmail, Apple ID, Outlook).', items: t1 },
+                { title: '⭐ Tier 2: High-Value Accounts', desc: 'Financial, development, or identity-reliant work profiles (e.g. GitHub, Stripe, Coinbase).', items: t2 },
+                { title: '🔓 Tier 3: Standard Accounts & Services', desc: 'Everyday accounts, socials, streaming services, and shopping profiles.', items: t3 }
+              ];
+  
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+                  {groups.map(group => {
+                    if (group.items.length === 0) return null;
+                    return (
+                      <div key={group.title} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+                        <div>
+                          <h3 style={{ fontSize: '14px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-primary)', margin: 0 }}>
+                            {group.title}
+                            <span style={{ fontSize: '11px', fontWeight: 500, opacity: 0.6 }}>({group.items.length})</span>
+                          </h3>
+                          <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: '4px 0 0 0' }}>{group.desc}</p>
+                        </div>
+                        <div className="vault-grid">
+                          {group.items.map((entry, index) => renderCard(entry, index))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            }
+  
+            return (
+              <div className="vault-grid">
+                {displayEntries.map((entry, index) => renderCard(entry, index))}
+              </div>
             );
           })()}
         </div>
@@ -639,23 +682,22 @@ const Dashboard = () => {
         />
       )}
 
-      {/* WEAVE AI CHATBOT (PRIVACY FIRST) */}
+      {/* WEAVE BOT (PRIVACY FIRST) */}
       <WeaveBot
         entries={allEntries}
         onEditEntry={(entry) => {
           setEditingEntry(entry);
           setShowModal(true);
         }}
+        verifyMasterPassword={verifyMasterPassword}
       />
 
-      {/* AI AUTO-DISCOVERY SCANNER MODAL */}
-      <AIDiscoverModal
+      {/* SMART IMPORT MODAL */}
+      <SmartImportModal
         isOpen={showDiscoverModal}
         onClose={() => setShowDiscoverModal(false)}
-        user={user}
         allEntries={allEntries}
         createEntry={createEntry}
-        updateEntry={updateEntry}
       />
 
       {/* MASTER PASSWORD REPROMPT MODAL */}
@@ -758,6 +800,20 @@ const VaultFormModal = ({ entry, allEntries, onSave, onClose }) => {
   const strength = analyzePassword(formData.password);
   const reuse = checkPasswordReuse(formData.password, allEntries, entry?.id);
 
+  const matchedService = useMemo(() => {
+    return getAccountType(formData.serviceName);
+  }, [formData.serviceName]);
+
+  const suggestions = useMemo(() => {
+    if (!formData.serviceName.trim() || entry) return [];
+    const query = formData.serviceName.toLowerCase();
+    return ACCOUNT_TYPES.filter(
+      (type) =>
+        type.name.toLowerCase().includes(query) &&
+        type.name.toLowerCase() !== query
+    ).slice(0, 5);
+  }, [formData.serviceName, entry]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setSaving(true);
@@ -771,19 +827,36 @@ const VaultFormModal = ({ entry, allEntries, onSave, onClose }) => {
     setShowPassword(true);
   };
 
+  const handleSelectSuggestion = (sug) => {
+    setFormData({
+      ...formData,
+      serviceName: sug.name,
+      url: sug.domain ? `https://${sug.domain}` : formData.url,
+      category: sug.category || formData.category,
+    });
+  };
+
+  const tierInfo = matchedService ? getTierLabel(matchedService.tier) : null;
+
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ borderTop: `4px solid ${matchedService?.brandColor || 'var(--accent-primary)'}` }}>
         <div className="modal-header">
-          <h2 className="modal-title">
-            {entry ? 'Edit Credential' : 'Add Credential'}
+          <h2 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span>{matchedService?.icon || '🔑'}</span>
+            <span>{entry ? 'Edit Credential' : 'Add Credential'}</span>
+            {tierInfo && (
+              <span style={{ fontSize: '9px', padding: '2px 8px', borderRadius: '10px', background: tierInfo.bg, color: tierInfo.color, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                {tierInfo.label}
+              </span>
+            )}
           </h2>
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
 
         <form onSubmit={handleSubmit}>
           <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-            <div className="form-field">
+            <div className="form-field" style={{ position: 'relative' }}>
               <label className="form-label">Service Name *</label>
               <input
                 type="text"
@@ -794,7 +867,26 @@ const VaultFormModal = ({ entry, allEntries, onSave, onClose }) => {
                 required
                 autoFocus
               />
+              {suggestions.length > 0 && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: 'var(--bg-secondary)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-sm)', zIndex: 1000, boxShadow: '0 4px 12px rgba(0,0,0,0.3)', marginTop: '4px' }}>
+                  {suggestions.map((sug) => (
+                    <button
+                      key={sug.name}
+                      type="button"
+                      onClick={() => handleSelectSuggestion(sug)}
+                      style={{ width: '100%', padding: '8px 12px', background: 'none', border: 'none', textAlign: 'left', color: 'var(--text-primary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', borderBottom: '1px solid rgba(255,255,255,0.03)' }}
+                      onMouseEnter={(e) => e.target.style.background = 'rgba(255,255,255,0.04)'}
+                      onMouseLeave={(e) => e.target.style.background = 'none'}
+                    >
+                      <span>{sug.icon}</span>
+                      <span style={{ fontSize: '12px', fontWeight: 600 }}>{sug.name}</span>
+                      <span style={{ fontSize: '10px', color: 'var(--text-muted)', marginLeft: 'auto' }}>{sug.domain}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
+
 
             <div className="form-field">
               <label className="form-label">Username / Email</label>
@@ -965,11 +1057,34 @@ const VaultFormModal = ({ entry, allEntries, onSave, onClose }) => {
 const PasswordStrengthInline = ({ password, allEntries, entryId }) => {
   if (!password) return null;
 
+  const [breachCount, setBreachCount] = useState(null);
+  const [checking, setChecking] = useState(false);
+
   const strength = analyzePassword(password);
   const reuse = checkPasswordReuse(password, allEntries, entryId);
 
+  useEffect(() => {
+    let active = true;
+    const runCheck = async () => {
+      setChecking(true);
+      setBreachCount(null);
+      try {
+        const count = await checkPasswordBreach(password);
+        if (active) {
+          setBreachCount(count);
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        if (active) setChecking(false);
+      }
+    };
+    runCheck();
+    return () => { active = false; };
+  }, [password]);
+
   return (
-    <div style={{ marginTop: 'var(--space-3)', display: 'flex', gap: 'var(--space-3)', alignItems: 'center' }}>
+    <div style={{ marginTop: 'var(--space-3)', display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', alignItems: 'center' }}>
       <span
         style={{
           fontSize: 'var(--text-xs)',
@@ -977,243 +1092,549 @@ const PasswordStrengthInline = ({ password, allEntries, entryId }) => {
           borderRadius: 'var(--radius-full)',
           background: strength.score >= 3 ? 'var(--success-subtle)' : strength.score >= 2 ? 'var(--warning-subtle)' : 'var(--danger-subtle)',
           color: strength.color,
+          fontWeight: 600
         }}
       >
         {strength.label}
       </span>
       {reuse.isReused && (
-        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--danger)' }}>
+        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--danger)', background: 'rgba(239, 68, 68, 0.08)', padding: '2px 8px', borderRadius: 'var(--radius-full)', fontWeight: 600 }}>
           ⚠️ Reused
+        </span>
+      )}
+      {checking && (
+        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+          <div className="spinner" style={{ width: '10px', height: '10px', borderWidth: '1px', borderTopColor: 'var(--text-muted)' }} /> Checking breaches...
+        </span>
+      )}
+      {!checking && breachCount === 0 && (
+        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--success)', background: 'rgba(16,185,129,0.08)', padding: '2px 8px', borderRadius: 'var(--radius-full)', fontWeight: 600 }}>
+          🛡️ Clean (0 Breaches)
+        </span>
+      )}
+      {!checking && breachCount > 0 && (
+        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--danger)', background: 'rgba(239,68,68,0.1)', padding: '2px 8px', borderRadius: 'var(--radius-full)', fontWeight: 700 }}>
+          🚨 Exposed in {breachCount} leaks!
         </span>
       )}
     </div>
   );
 };
 
-// ─── AI ACCOUNT DISCOVERY MODAL ───────────────────────────
+// ─── SMART IMPORT MODAL ───────────────────────────────────
 
-const AIDiscoverModal = ({ isOpen, onClose, user, allEntries, createEntry, updateEntry }) => {
-  const [step, setStep] = useState('connect'); // 'connect' | 'scanning' | 'results'
-  const [emailToScan, setEmailToScan] = useState(user?.email || '');
-  const [provider, setProvider] = useState('gmail'); // 'gmail' | 'outlook'
-  const [scanText, setScanText] = useState('Connecting secure session...');
-  const [selectedItems, setSelectedItems] = useState({
-    netflix: true,
-    spotify: true,
-    amazon: true,
-    zoom: true
-  });
+const KNOWN_SERVICES = [
+  { name: 'Gmail', url: 'https://mail.google.com', category: 'personal', keywords: ['gmail', 'google mail', 'googlemail'] },
+  { name: 'Google', url: 'https://google.com', category: 'personal', keywords: ['google', 'google account'] },
+  { name: 'Outlook', url: 'https://outlook.com', category: 'work', keywords: ['outlook', 'hotmail', 'live.com', 'msn'] },
+  { name: 'Microsoft', url: 'https://microsoft.com', category: 'work', keywords: ['microsoft', 'azure', 'office 365', 'office365', 'ms365'] },
+  { name: 'Apple', url: 'https://appleid.apple.com', category: 'personal', keywords: ['apple', 'apple id', 'icloud', 'apple account'] },
+  { name: 'iCloud', url: 'https://icloud.com', category: 'personal', keywords: ['icloud', 'icloud.com'] },
+  { name: 'GitHub', url: 'https://github.com', category: 'development', keywords: ['github', 'github.com'] },
+  { name: 'GitLab', url: 'https://gitlab.com', category: 'development', keywords: ['gitlab', 'gitlab.com'] },
+  { name: 'Twitter / X', url: 'https://x.com', category: 'social', keywords: ['twitter', 'x.com', 'tweet'] },
+  { name: 'Instagram', url: 'https://instagram.com', category: 'social', keywords: ['instagram', 'insta'] },
+  { name: 'Facebook', url: 'https://facebook.com', category: 'social', keywords: ['facebook', 'fb', 'facebook.com'] },
+  { name: 'LinkedIn', url: 'https://linkedin.com', category: 'work', keywords: ['linkedin'] },
+  { name: 'Discord', url: 'https://discord.com', category: 'social', keywords: ['discord', 'discord.com'] },
+  { name: 'Slack', url: 'https://slack.com', category: 'work', keywords: ['slack', 'slack.com'] },
+  { name: 'Zoom', url: 'https://zoom.us', category: 'work', keywords: ['zoom', 'zoom.us'] },
+  { name: 'Netflix', url: 'https://netflix.com', category: 'general', keywords: ['netflix', 'netflix.com'] },
+  { name: 'Spotify', url: 'https://spotify.com', category: 'general', keywords: ['spotify'] },
+  { name: 'Amazon', url: 'https://amazon.com', category: 'shopping', keywords: ['amazon', 'amazon.com', 'prime'] },
+  { name: 'PayPal', url: 'https://paypal.com', category: 'banking', keywords: ['paypal', 'paypal.com'] },
+  { name: 'Stripe', url: 'https://stripe.com', category: 'banking', keywords: ['stripe'] },
+  { name: 'Reddit', url: 'https://reddit.com', category: 'social', keywords: ['reddit', 'subreddit'] },
+  { name: 'YouTube', url: 'https://youtube.com', category: 'general', keywords: ['youtube', 'yt'] },
+  { name: 'Twitch', url: 'https://twitch.tv', category: 'social', keywords: ['twitch'] },
+  { name: 'Steam', url: 'https://store.steampowered.com', category: 'general', keywords: ['steam', 'steampowered'] },
+  { name: 'Epic Games', url: 'https://epicgames.com', category: 'general', keywords: ['epic games', 'epicgames', 'fortnite'] },
+  { name: 'PlayStation', url: 'https://playstation.com', category: 'general', keywords: ['playstation', 'psn', 'ps5', 'ps4'] },
+  { name: 'Xbox', url: 'https://xbox.com', category: 'general', keywords: ['xbox', 'xbox live', 'gamertag'] },
+  { name: 'Dropbox', url: 'https://dropbox.com', category: 'work', keywords: ['dropbox'] },
+  { name: 'Notion', url: 'https://notion.so', category: 'work', keywords: ['notion'] },
+  { name: 'Figma', url: 'https://figma.com', category: 'development', keywords: ['figma'] },
+  { name: 'Canva', url: 'https://canva.com', category: 'general', keywords: ['canva'] },
+  { name: 'Adobe', url: 'https://adobe.com', category: 'work', keywords: ['adobe', 'photoshop', 'illustrator', 'adobe id'] },
+  { name: 'Cloudflare', url: 'https://cloudflare.com', category: 'development', keywords: ['cloudflare'] },
+  { name: 'AWS', url: 'https://aws.amazon.com', category: 'development', keywords: ['aws', 'amazon web services', 'ec2', 's3'] },
+  { name: 'Vercel', url: 'https://vercel.com', category: 'development', keywords: ['vercel'] },
+  { name: 'Heroku', url: 'https://heroku.com', category: 'development', keywords: ['heroku'] },
+  { name: 'DigitalOcean', url: 'https://digitalocean.com', category: 'development', keywords: ['digitalocean', 'digital ocean'] },
+  { name: 'Google Cloud', url: 'https://cloud.google.com', category: 'development', keywords: ['gcp', 'google cloud'] },
+  { name: 'Jira', url: 'https://atlassian.com', category: 'work', keywords: ['jira', 'atlassian', 'confluence', 'bitbucket'] },
+  { name: 'Trello', url: 'https://trello.com', category: 'work', keywords: ['trello'] },
+  { name: 'Asana', url: 'https://asana.com', category: 'work', keywords: ['asana'] },
+  { name: 'Shopify', url: 'https://shopify.com', category: 'shopping', keywords: ['shopify'] },
+  { name: 'eBay', url: 'https://ebay.com', category: 'shopping', keywords: ['ebay', 'ebay.com'] },
+  { name: 'Etsy', url: 'https://etsy.com', category: 'shopping', keywords: ['etsy'] },
+  { name: 'WhatsApp', url: 'https://web.whatsapp.com', category: 'social', keywords: ['whatsapp'] },
+  { name: 'Telegram', url: 'https://telegram.org', category: 'social', keywords: ['telegram'] },
+  { name: 'Signal', url: 'https://signal.org', category: 'social', keywords: ['signal'] },
+  { name: 'Yahoo', url: 'https://yahoo.com', category: 'personal', keywords: ['yahoo', 'yahoo mail'] },
+  { name: 'Proton Mail', url: 'https://proton.me', category: 'personal', keywords: ['protonmail', 'proton mail', 'proton.me'] },
+  { name: 'Bitwarden', url: 'https://bitwarden.com', category: 'general', keywords: ['bitwarden'] },
+  { name: '1Password', url: 'https://1password.com', category: 'general', keywords: ['1password'] },
+  { name: 'Dashlane', url: 'https://dashlane.com', category: 'general', keywords: ['dashlane'] },
+  { name: 'LastPass', url: 'https://lastpass.com', category: 'general', keywords: ['lastpass'] },
+  { name: 'Coinbase', url: 'https://coinbase.com', category: 'banking', keywords: ['coinbase', 'bitcoin', 'crypto', 'ethereum'] },
+  { name: 'Binance', url: 'https://binance.com', category: 'banking', keywords: ['binance'] },
+  { name: 'Chase', url: 'https://chase.com', category: 'banking', keywords: ['chase', 'jpmorgan'] },
+  { name: 'Coursera', url: 'https://coursera.org', category: 'general', keywords: ['coursera'] },
+  { name: 'Udemy', url: 'https://udemy.com', category: 'general', keywords: ['udemy'] },
+  { name: 'Medium', url: 'https://medium.com', category: 'social', keywords: ['medium', 'medium.com'] },
+  { name: 'Substack', url: 'https://substack.com', category: 'social', keywords: ['substack'] },
+  { name: 'Snapchat', url: 'https://snapchat.com', category: 'social', keywords: ['snapchat', 'snap'] },
+  { name: 'TikTok', url: 'https://tiktok.com', category: 'social', keywords: ['tiktok', 'tik tok'] },
+  { name: 'Pinterest', url: 'https://pinterest.com', category: 'social', keywords: ['pinterest'] },
+];
+
+const parseServicesFromText = (text) => {
+  if (!text) return [];
+  const lower = text.toLowerCase();
+  const found = [];
+  const seenNames = new Set();
+  for (const service of KNOWN_SERVICES) {
+    for (const kw of service.keywords) {
+      if (lower.includes(kw) && !seenNames.has(service.name)) {
+        found.push(service);
+        seenNames.add(service.name);
+        break;
+      }
+    }
+  }
+  return found;
+};
+
+const parseCSV = (csvText) => {
+  const lines = csvText.split('\n').map(line => line.trim()).filter(Boolean);
+  if (lines.length < 2) return [];
+
+  // Parse headers to find indexes
+  const headers = lines[0].split(',').map(h => h.replace(/^["']|["']$/g, '').toLowerCase().trim());
+  
+  let nameIdx = headers.findIndex(h => h.includes('name') || h.includes('title') || h.includes('service') || h.includes('login') || h.includes('label'));
+  let urlIdx = headers.findIndex(h => h.includes('url') || h.includes('website') || h.includes('link'));
+  let userIdx = headers.findIndex(h => h.includes('user') || h.includes('email') || h.includes('login_name') || h.includes('username'));
+  let passIdx = headers.findIndex(h => h.includes('pass') || h.includes('secret') || h.includes('code') || h.includes('password'));
+
+  // Fallbacks if headers are missing/not recognized
+  if (nameIdx === -1) nameIdx = 0;
+  if (userIdx === -1) userIdx = headers.length > 1 ? 1 : 0;
+  if (passIdx === -1) passIdx = headers.length > 2 ? 2 : 0;
+  if (urlIdx === -1) urlIdx = headers.length > 3 ? 3 : 0;
+
+  const parsed = [];
+  for (let i = 1; i < lines.length; i++) {
+    // Basic CSV splitting (handling commas inside quotes)
+    const row = [];
+    let current = '';
+    let inQuotes = false;
+    for (let char of lines[i]) {
+      if (char === '"' || char === "'") {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        row.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    row.push(current.trim());
+
+    const name = row[nameIdx]?.replace(/^["']|["']$/g, '') || '';
+    if (!name) continue;
+
+    const url = row[urlIdx]?.replace(/^["']|["']$/g, '') || '';
+    const username = row[userIdx]?.replace(/^["']|["']$/g, '') || '';
+    const password = row[passIdx]?.replace(/^["']|["']$/g, '') || '';
+
+    // Map name to category
+    let category = 'general';
+    const lowerName = name.toLowerCase();
+    if (lowerName.includes('mail') || lowerName.includes('google') || lowerName.includes('icloud') || lowerName.includes('outlook')) category = 'personal';
+    else if (lowerName.includes('bank') || lowerName.includes('paypal') || lowerName.includes('coinbase') || lowerName.includes('stripe') || lowerName.includes('chase')) category = 'banking';
+    else if (lowerName.includes('github') || lowerName.includes('gitlab') || lowerName.includes('aws') || lowerName.includes('vercel') || lowerName.includes('heroku') || lowerName.includes('cloudflare')) category = 'development';
+    else if (lowerName.includes('facebook') || lowerName.includes('instagram') || lowerName.includes('twitter') || lowerName.includes('linkedin') || lowerName.includes('discord') || lowerName.includes('slack')) category = 'social';
+    else if (lowerName.includes('amazon') || lowerName.includes('ebay') || lowerName.includes('etsy') || lowerName.includes('shopify')) category = 'shopping';
+    else if (lowerName.includes('netflix') || lowerName.includes('spotify') || lowerName.includes('zoom') || lowerName.includes('notion') || lowerName.includes('figma')) category = 'work';
+
+    parsed.push({
+      name,
+      url: url.startsWith('http') ? url : (url ? `https://${url}` : ''),
+      category,
+      username,
+      password
+    });
+  }
+  return parsed;
+};
+
+const SmartImportModal = ({ isOpen, onClose, allEntries, createEntry }) => {
+  const [mode, setMode] = useState('menu'); // 'menu' | 'paste' | 'catalog' | 'csv' | 'review'
+  const [pasteText, setPasteText] = useState('');
+  const [csvText, setCsvText] = useState('');
+  const [foundServices, setFoundServices] = useState([]);
+  const [selectedServices, setSelectedServices] = useState(new Set());
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [catalogSelected, setCatalogSelected] = useState(new Set());
+  const [credentialsMap, setCredentialsMap] = useState({}); // { serviceName: { username, password } }
   const [saving, setSaving] = useState(false);
 
-  const discoveryList = [
-    { id: 'netflix', name: 'Netflix', url: 'https://netflix.com', category: 'general' },
-    { id: 'spotify', name: 'Spotify', url: 'https://spotify.com', category: 'social' },
-    { id: 'amazon', name: 'Amazon', url: 'https://amazon.com', category: 'shopping' },
-    { id: 'zoom', name: 'Zoom', url: 'https://zoom.us', category: 'work' }
-  ];
-
-  useEffect(() => {
-    if (step !== 'scanning') return;
-
-    const phrases = [
-      `Establishing secure SSL handshake for ${emailToScan}...`,
-      `Querying ${provider === 'gmail' ? 'Gmail API' : 'Graph API'} for message headers...`,
-      'Filtering metadata subjects for signup / welcome keywords...',
-      'Mapping matching service endpoints to vault categories...',
-      'Deduplicating existing vault entries...',
-      'Compiling final discovered list...'
-    ];
-
-    let current = 0;
-    const interval = setInterval(() => {
-      if (current < phrases.length - 1) {
-        current++;
-        setScanText(phrases[current]);
-      } else {
-        clearInterval(interval);
-        setStep('results');
-      }
-    }, 1200);
-
-    return () => clearInterval(interval);
-  }, [step, emailToScan, provider]);
-
-  if (!isOpen) return null;
-
-  const handleStartScan = (selectedProvider) => {
-    if (!emailToScan || !emailToScan.includes('@')) {
-      return toast.error('Please enter a valid email address first');
-    }
-    setProvider(selectedProvider);
-    setStep('scanning');
+  const resetAll = () => {
+    setMode('menu');
+    setPasteText('');
+    setCsvText('');
+    setFoundServices([]);
+    setSelectedServices(new Set());
+    setCatalogSearch('');
+    setCatalogSelected(new Set());
+    setCredentialsMap({});
   };
 
-  const handleSecureSelected = async () => {
+  const handleParseText = () => {
+    const found = parseServicesFromText(pasteText);
+    if (found.length === 0) {
+      toast.error('No recognizable services found in text. Try adding service names like "Gmail", "Netflix", "GitHub".');
+      return;
+    }
+    setFoundServices(found);
+    setSelectedServices(new Set(found.map(s => s.name)));
+    setMode('review');
+  };
+
+  const handleParseCSV = () => {
+    const parsed = parseCSV(csvText);
+    if (parsed.length === 0) {
+      toast.error('No valid accounts found in CSV. Make sure you have at least a Name, Username, and Password column.');
+      return;
+    }
+    setFoundServices(parsed);
+    setSelectedServices(new Set(parsed.map(s => s.name)));
+    const creds = {};
+    parsed.forEach(s => {
+      creds[s.name] = { username: s.username, password: s.password };
+    });
+    setCredentialsMap(creds);
+    setMode('review');
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      setCsvText(event.target.result);
+      toast.success(`Successfully loaded ${file.name}! Click 'Start Parsing CSV' below.`);
+    };
+    reader.readAsText(file);
+  };
+
+  const handleCatalogConfirm = () => {
+    const selected = KNOWN_SERVICES.filter(s => catalogSelected.has(s.name));
+    setFoundServices(selected);
+    setSelectedServices(new Set(selected.map(s => s.name)));
+    setMode('review');
+  };
+
+  const isAlreadyInVault = (serviceName) => {
+    return allEntries.some(e => (e.serviceName || '').toLowerCase().trim() === serviceName.toLowerCase().trim());
+  };
+
+  const handleSaveAll = async () => {
+    const toSave = foundServices.filter(s => selectedServices.has(s.name) && !isAlreadyInVault(s.name));
+    if (toSave.length === 0) {
+      toast.error('No new services to add (all are already in vault or none selected).');
+      return;
+    }
     setSaving(true);
     try {
-      const itemsToSecure = discoveryList.filter(item => selectedItems[item.id]);
-      let added = 0;
-      let updated = 0;
-      for (const item of itemsToSecure) {
-        const exists = allEntries.find(
-          e => e.serviceName.toLowerCase().trim() === item.name.toLowerCase() &&
-               (e.username || '').toLowerCase().trim() === emailToScan.toLowerCase().trim()
-        );
-        const securePassword = generatePassword(20);
-        if (exists) {
-          await updateEntry(exists.id, {
-            ...exists,
-            password: securePassword,
-            notes: `${exists.notes || ''} (Auto-updated via AI Inbox Scan)`.trim()
-          });
-          updated++;
-        } else {
-          await createEntry({
-            serviceName: item.name,
-            username: emailToScan,
-            password: securePassword,
-            url: item.url,
-            category: item.category,
-            notes: `Auto-discovered via AI Inbox Scan.`
-          });
-          added++;
-        }
+      let saved = 0;
+      for (const service of toSave) {
+        const creds = credentialsMap[service.name] || {};
+        await createEntry({
+          serviceName: service.name,
+          username: creds.username || '',
+          password: creds.password || '',
+          url: service.url,
+          category: service.category,
+          notes: `Imported via Smart Import on ${new Date().toLocaleDateString()}.`,
+        });
+        saved++;
       }
-      if (updated > 0 && added > 0) {
-        toast.success(`Secured: ${added} new, updated ${updated} existing accounts!`);
-      } else if (updated > 0) {
-        toast.success(`Updated and secured ${updated} accounts!`);
-      } else {
-        toast.success(`Successfully secured ${added} accounts!`);
-      }
+      toast.success(`Added ${saved} account${saved !== 1 ? 's' : ''} to your vault!`);
+      resetAll();
       onClose();
-      setStep('connect');
     } catch (err) {
-      toast.error('Failed to auto-provision credentials');
+      toast.error('Failed to save some accounts');
     } finally {
       setSaving(false);
     }
   };
 
+  if (!isOpen) return null;
+
+  const filteredCatalog = KNOWN_SERVICES.filter(s =>
+    !catalogSearch || s.name.toLowerCase().includes(catalogSearch.toLowerCase())
+  );
+
   return (
     <div className="modal-overlay" style={{ zIndex: 1000 }}>
-      <div className="modal-content animate-scale-in" style={{ maxWidth: '480px' }}>
+      <div className="modal-content animate-scale-in" style={{ maxWidth: mode === 'review' ? '560px' : '480px' }}>
         <div className="modal-header">
-          <h2 className="modal-title">⚡ AI Auto-Discovery Scanner</h2>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <h2 className="modal-title">⚡ Smart Account Import</h2>
+          <button className="modal-close" onClick={() => { resetAll(); onClose(); }}>✕</button>
         </div>
 
         <div className="modal-body">
-          {step === 'connect' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', lineHeight: '1.6' }}>
-                Avoid typing credentials manually. Connect your inbox securely to scan account creation confirmations and welcome messages.
-              </p>
 
-              <div className="form-field" style={{ marginBottom: '6px' }}>
-                <label className="form-label">Target Inbox Email Address</label>
-                <input
-                  type="email"
-                  className="form-input"
-                  placeholder="your@email.com"
-                  value={emailToScan}
-                  onChange={(e) => setEmailToScan(e.target.value)}
-                  style={{ fontSize: '13px' }}
-                />
+          {/* MENU */}
+          {mode === 'menu' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', lineHeight: 1.6, margin: 0 }}>
+                Quickly add multiple accounts to your vault. Choose how you want to import:
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <button className="btn btn-secondary" style={{ justifyContent: 'flex-start', padding: '14px 16px', gap: '12px' }} onClick={() => setMode('paste')}>
+                  <span style={{ fontSize: '20px' }}>📋</span>
+                  <div style={{ textAlign: 'left' }}>
+                    <div style={{ fontWeight: 600, fontSize: '13px' }}>Paste Text / Email</div>
+                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>Paste anything — emails, notes, browser history. We'll detect service names automatically.</div>
+                  </div>
+                </button>
+                <button className="btn btn-secondary" style={{ justifyContent: 'flex-start', padding: '14px 16px', gap: '12px' }} onClick={() => setMode('catalog')}>
+                  <span style={{ fontSize: '20px' }}>🗂️</span>
+                  <div style={{ textAlign: 'left' }}>
+                    <div style={{ fontWeight: 600, fontSize: '13px' }}>Pick from Service Catalog</div>
+                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>Browse 60+ popular services and select which ones you have accounts on.</div>
+                  </div>
+                </button>
+                <button className="btn btn-secondary" style={{ justifyContent: 'flex-start', padding: '14px 16px', gap: '12px' }} onClick={() => setMode('csv')}>
+                  <span style={{ fontSize: '20px' }}>📂</span>
+                  <div style={{ textAlign: 'left' }}>
+                    <div style={{ fontWeight: 600, fontSize: '13px' }}>Import from Browser / CSV</div>
+                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>Upload or paste a CSV export from Google Chrome, Safari, 1Password, or Bitwarden.</div>
+                  </div>
+                </button>
               </div>
+              <div style={{ padding: '10px 12px', background: 'rgba(139,124,247,0.05)', border: '1px solid rgba(139,124,247,0.15)', borderRadius: 'var(--radius-sm)', fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                🔒 <strong>Your data never leaves your device.</strong> Pattern matching runs entirely in your browser. No emails, no API calls, no scans.
+              </div>
+            </div>
+          )}
+
+          {/* PASTE TEXT */}
+          {mode === 'paste' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', lineHeight: 1.6, margin: 0 }}>
+                Paste any text that mentions services you use — email confirmations, account summaries, browser bookmarks export, anything.
+              </p>
+              <textarea
+                className="form-textarea"
+                placeholder="e.g. 'I use Gmail for work, have a Netflix subscription, GitHub for code, and PayPal for payments...'"
+                value={pasteText}
+                onChange={(e) => setPasteText(e.target.value)}
+                rows={7}
+                style={{ fontSize: '12px', lineHeight: 1.6 }}
+                autoFocus
+              />
+              <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+                <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setMode('menu')}>← Back</button>
+                <button className="btn btn-primary" style={{ flex: 2 }} onClick={handleParseText} disabled={!pasteText.trim()}>
+                  Detect Services →
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* CSV IMPORT */}
+          {mode === 'csv' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', lineHeight: 1.5, margin: 0 }}>
+                Upload or paste a <strong>.csv</strong> export from Google Chrome, Safari, 1Password, or Bitwarden. We will parse it securely on your device.
+              </p>
               
-              <div style={{ padding: 'var(--space-3) var(--space-4)', background: 'rgba(139, 124, 247, 0.08)', border: '1px dashed var(--accent-primary)', borderRadius: 'var(--radius-md)', display: 'flex', gap: '10px', alignItems: 'center' }}>
-                <span style={{ fontSize: '20px' }}>🔒</span>
-                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', margin: 0 }}>
-                  <strong>Zero-Knowledge Safety:</strong> Scanning parses mail subjects client-side. Weave never reads password text or content, and no logs leave your machine.
-                </p>
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: 'var(--space-2)' }}>
-                <button className="btn btn-secondary" style={{ justifyContent: 'flex-start', padding: '14px', gap: '12px' }} onClick={() => handleStartScan('gmail')}>
-                  <span>🌐</span> Connect Gmail Workspace
-                </button>
-                <button className="btn btn-secondary" style={{ justifyContent: 'flex-start', padding: '14px', gap: '12px' }} onClick={() => handleStartScan('outlook')}>
-                  <span>💻</span> Connect Microsoft Outlook
-                </button>
-              </div>
-            </div>
-          )}
-
-          {step === 'scanning' && (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '40px 20px', gap: 'var(--space-5)' }}>
-              <div className="spinner spinner-lg" style={{ width: '48px', height: '48px', borderWidth: '4px', borderTopColor: 'var(--accent-primary)' }} />
-              <p style={{ fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--text-primary)', textAlign: 'center' }}>
-                {scanText}
-              </p>
-              <div style={{ width: '100%', height: '4px', background: 'var(--border-default)', borderRadius: '2px', overflow: 'hidden' }}>
-                <div 
-                  className="strength-bar-fill" 
-                  style={{ 
-                    width: '100%', 
-                    background: 'var(--accent-primary)', 
-                    animation: 'spin 4s linear infinite' 
-                  }} 
+              <div style={{ border: '2px dashed var(--border-default)', padding: '16px', borderRadius: 'var(--radius-md)', textAlign: 'center', background: 'rgba(255,255,255,0.01)', position: 'relative' }}>
+                <input 
+                  type="file" 
+                  accept=".csv" 
+                  onChange={handleFileUpload} 
+                  style={{ opacity: 0, position: 'absolute', inset: 0, cursor: 'pointer', width: '100%' }}
                 />
+                <span style={{ fontSize: '24px', display: 'block', marginBottom: '8px' }}>📂</span>
+                <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                  Drag & drop CSV file or click to browse
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '4px 0' }}>
+                <div style={{ flex: 1, height: '1px', background: 'var(--border-default)' }} />
+                <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 600 }}>OR PASTE CSV TEXT BELOW</span>
+                <div style={{ flex: 1, height: '1px', background: 'var(--border-default)' }} />
+              </div>
+
+              <textarea
+                className="form-textarea"
+                placeholder="url,username,password&#10;https://github.com,yourusername,yourpassword"
+                value={csvText}
+                onChange={(e) => setCsvText(e.target.value)}
+                rows={5}
+                style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', lineHeight: 1.5 }}
+              />
+              
+              <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+                <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setMode('menu')}>← Back</button>
+                <button className="btn btn-primary" style={{ flex: 2 }} onClick={handleParseCSV} disabled={!csvText.trim()}>
+                  Start Parsing CSV →
+                </button>
               </div>
             </div>
           )}
 
-          {step === 'results' && (
+          {/* CATALOG */}
+          {mode === 'catalog' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                We identified **4** active accounts linked to <strong>{emailToScan}</strong>. Selected accounts will be saved into Weave with secure generated passwords.
-              </p>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '200px', overflowY: 'auto', paddingRight: '4px' }}>
-                {discoveryList.map(item => (
-                  <label 
-                    key={item.id} 
-                    style={{ 
-                      display: 'flex', 
-                      alignItems: 'center', 
-                      justifyContent: 'space-between',
-                      padding: '12px 16px', 
-                      background: 'var(--bg-input)', 
-                      border: '1px solid var(--border-default)', 
-                      borderRadius: 'var(--radius-sm)',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                      <div style={{ width: '28px', height: '28px', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', flexShrink: 0 }}>
-                        <ServiceLogo name={item.name} url={item.url} category={item.category} size={18} />
-                      </div>
-                      <div style={{ display: 'flex', flexDirection: 'column' }}>
-                        <span style={{ fontSize: '13px', fontWeight: 600 }}>{item.name}</span>
-                        <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>{item.url}</span>
-                      </div>
-                    </div>
-                    <input 
-                      type="checkbox" 
-                      checked={selectedItems[item.id]} 
-                      onChange={() => setSelectedItems({ ...selectedItems, [item.id]: !selectedItems[item.id] })}
-                      style={{ width: '18px', height: '18px', cursor: 'pointer' }}
-                    />
-                  </label>
-                ))}
+              <input
+                type="text"
+                className="form-input"
+                placeholder="Search services..."
+                value={catalogSearch}
+                onChange={(e) => setCatalogSearch(e.target.value)}
+                autoFocus
+              />
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', maxHeight: '300px', overflowY: 'auto', paddingRight: '2px' }}>
+                {filteredCatalog.map(service => {
+                  const selected = catalogSelected.has(service.name);
+                  const inVault = isAlreadyInVault(service.name);
+                  return (
+                    <button
+                      key={service.name}
+                      onClick={() => {
+                        if (inVault) return;
+                        const next = new Set(catalogSelected);
+                        if (selected) next.delete(service.name); else next.add(service.name);
+                        setCatalogSelected(next);
+                      }}
+                      style={{
+                        padding: '8px 10px',
+                        background: selected ? 'rgba(139,124,247,0.12)' : 'var(--bg-input)',
+                        border: `1px solid ${selected ? 'var(--accent-primary)' : 'var(--border-default)'}`,
+                        borderRadius: 'var(--radius-sm)',
+                        cursor: inVault ? 'default' : 'pointer',
+                        fontSize: '11px',
+                        fontWeight: 500,
+                        color: inVault ? 'var(--text-muted)' : 'var(--text-primary)',
+                        textAlign: 'center',
+                        position: 'relative',
+                        opacity: inVault ? 0.5 : 1,
+                      }}
+                    >
+                      {service.name}
+                      {inVault && <span style={{ display: 'block', fontSize: '8px', color: 'var(--success)', marginTop: '2px' }}>✓ In vault</span>}
+                      {selected && !inVault && <span style={{ display: 'block', fontSize: '8px', color: 'var(--accent-primary)', marginTop: '2px' }}>Selected</span>}
+                    </button>
+                  );
+                })}
               </div>
-
-              <button 
-                className="btn btn-primary btn-full btn-lg" 
-                onClick={handleSecureSelected} 
-                disabled={saving || !Object.values(selectedItems).some(Boolean)}
-                style={{ marginTop: 'var(--space-2)' }}
-              >
-                {saving ? 'Securing accounts...' : '🔒 Auto-Secure Selected Accounts'}
-              </button>
+              <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{catalogSelected.size} selected</div>
+              <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+                <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setMode('menu')}>← Back</button>
+                <button className="btn btn-primary" style={{ flex: 2 }} onClick={handleCatalogConfirm} disabled={catalogSelected.size === 0}>
+                  Continue with {catalogSelected.size} services →
+                </button>
+              </div>
             </div>
           )}
+
+          {/* REVIEW & FILL CREDENTIALS */}
+          {mode === 'review' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', lineHeight: 1.5, margin: 0 }}>
+                Found <strong>{foundServices.length}</strong> service{foundServices.length !== 1 ? 's' : ''}. Fill in your credentials (leave blank to save as a placeholder). Services already in your vault are skipped automatically.
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '340px', overflowY: 'auto', paddingRight: '4px' }}>
+                {foundServices.map(service => {
+                  const inVault = isAlreadyInVault(service.name);
+                  const isSelected = selectedServices.has(service.name);
+                  const creds = credentialsMap[service.name] || { username: '', password: '' };
+                  return (
+                    <div
+                      key={service.name}
+                      style={{
+                        padding: '12px 14px',
+                        background: inVault ? 'rgba(46,213,115,0.03)' : 'var(--bg-input)',
+                        border: `1px solid ${inVault ? 'rgba(46,213,115,0.2)' : isSelected ? 'var(--border-default)' : 'rgba(255,255,255,0.03)'}`,
+                        borderRadius: 'var(--radius-sm)',
+                        opacity: inVault || !isSelected ? 0.65 : 1,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: inVault ? 0 : '10px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <div style={{ width: '24px', height: '24px', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', flexShrink: 0 }}>
+                            <ServiceLogo name={service.name} url={service.url} category={service.category} size={14} />
+                          </div>
+                          <span style={{ fontSize: '12px', fontWeight: 600 }}>{service.name}</span>
+                          {inVault && <span style={{ fontSize: '9px', color: 'var(--success)', background: 'rgba(46,213,115,0.1)', padding: '1px 6px', borderRadius: '4px' }}>✓ Already saved</span>}
+                        </div>
+                        {!inVault && (
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {
+                              const next = new Set(selectedServices);
+                              if (isSelected) next.delete(service.name); else next.add(service.name);
+                              setSelectedServices(next);
+                            }}
+                            style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+                          />
+                        )}
+                      </div>
+                      {!inVault && isSelected && (
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                          <input
+                            type="text"
+                            className="form-input"
+                            placeholder="Email / Username"
+                            value={creds.username}
+                            onChange={(e) => setCredentialsMap(prev => ({ ...prev, [service.name]: { ...prev[service.name], username: e.target.value } }))}
+                            style={{ fontSize: '11px', padding: '5px 10px', height: '30px' }}
+                          />
+                          <input
+                            type="password"
+                            className="form-input"
+                            placeholder="Password (optional)"
+                            value={creds.password}
+                            onChange={(e) => setCredentialsMap(prev => ({ ...prev, [service.name]: { ...prev[service.name], password: e.target.value } }))}
+                            style={{ fontSize: '11px', padding: '5px 10px', height: '30px' }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ padding: '8px 10px', background: 'rgba(139,124,247,0.05)', border: '1px solid rgba(139,124,247,0.12)', borderRadius: 'var(--radius-sm)', fontSize: '10px', color: 'var(--text-muted)' }}>
+                💡 Leaving password blank saves a placeholder entry — you can fill it in later from the edit screen.
+              </div>
+              <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+                <button className="btn btn-secondary" onClick={() => setMode('menu')}>← Back</button>
+                <button
+                  className="btn btn-primary btn-full"
+                  onClick={handleSaveAll}
+                  disabled={saving || selectedServices.size === 0}
+                >
+                  {saving ? 'Saving...' : `Add ${[...selectedServices].filter(n => !isAlreadyInVault(n)).length} New Account(s) to Vault`}
+                </button>
+              </div>
+            </div>
+          )}
+
         </div>
       </div>
     </div>
   );
 };
+
 
 // ─── PASSWORD CHECKUP VIEW ─────────────────────────────────
 
@@ -1641,13 +2062,61 @@ const IdentityHubView = ({ allEntries, onEditEntry }) => {
     }
   };
 
+  const tierSummary = useMemo(() => {
+    const t1 = allEntries.filter(e => { const t = getAccountType(e.serviceName); return t?.tier === 1 || t?.isIdentityAnchor; });
+    const t2 = allEntries.filter(e => { const t = getAccountType(e.serviceName); return t?.tier === 2 && !t?.isIdentityAnchor; });
+    const t3 = allEntries.filter(e => { const t = getAccountType(e.serviceName); return !t || t?.tier === 3; });
+    return { t1, t2, t3 };
+  }, [allEntries]);
+
+  const overallHealth = useMemo(() => {
+    if (allEntries.length === 0) return 0;
+    const scores = allEntries.map(entry => {
+      const { score: strengthScore } = analyzePassword(entry.password || '');
+      const isReused = checkPasswordReuse(entry, allEntries);
+      return computeAccountHealthScore(entry, { isReused, strengthScore });
+    });
+    return Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
+  }, [allEntries]);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)', paddingBottom: 'var(--space-12)' }}>
-      <div style={{ padding: 'var(--space-6)', background: 'rgba(139, 124, 247, 0.04)', border: '1px solid rgba(139, 124, 247, 0.15)', borderRadius: 'var(--radius-lg)' }}>
-        <h2 style={{ fontSize: '18px', fontWeight: 700, marginBottom: 'var(--space-2)' }}>🔗 Identity & Recovery Hub</h2>
-        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.5 }}>
-          Visualize and map how your core digital identities (Gmail, Outlook, Apple ID) are recovered and secured. Secure recovery loops to prevent catastrophic account lockouts.
-        </p>
+      {/* Header */}
+      <div style={{ padding: 'var(--space-6)', background: 'rgba(139, 124, 247, 0.04)', border: '1px solid rgba(139, 124, 247, 0.15)', borderRadius: 'var(--radius-lg)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <h2 style={{ fontSize: '18px', fontWeight: 700, marginBottom: 'var(--space-2)' }}>🔗 Digital Identity Hub</h2>
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.5 }}>
+            Your complete account ecosystem — all credentials organized by tier. Track recovery chains, 2FA coverage, and security health across every account you own.
+          </p>
+        </div>
+        {/* Overall health ring */}
+        {allEntries.length > 0 && (() => {
+          const hd = getHealthScoreDisplay(overallHealth);
+          return (
+            <div style={{ flexShrink: 0, textAlign: 'center', padding: '12px 20px', background: 'rgba(0,0,0,0.2)', borderRadius: 'var(--radius-md)', border: `1px solid ${hd.color}33` }}>
+              <div style={{ fontSize: '28px', fontWeight: 800, color: hd.color, lineHeight: 1 }}>{overallHealth}</div>
+              <div style={{ fontSize: '9px', color: hd.color, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', marginTop: '4px' }}>Vault Health</div>
+              <div style={{ fontSize: '9px', color: 'var(--text-muted)', marginTop: '2px' }}>{hd.label}</div>
+            </div>
+          );
+        })()}
+      </div>
+
+      {/* Tier summary strip */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+        {[
+          { label: 'Core Identity', count: tierSummary.t1.length, color: '#ef4444', bg: 'rgba(239,68,68,0.05)', icon: '🔑', tip: 'Accounts used to recover other accounts. Secure these first.' },
+          { label: 'High Value', count: tierSummary.t2.length, color: '#f59e0b', bg: 'rgba(245,158,11,0.05)', icon: '⭐', tip: 'Financial, development, and professional accounts.' },
+          { label: 'Standard', count: tierSummary.t3.length, color: '#10b981', bg: 'rgba(16,185,129,0.05)', icon: '🔓', tip: 'Social, entertainment, and everyday accounts.' },
+        ].map(({ label, count, color, bg, icon, tip }) => (
+          <div key={label} title={tip} style={{ padding: '14px 16px', background: bg, border: `1px solid ${color}22`, borderRadius: 'var(--radius-md)', display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <span style={{ fontSize: '22px' }}>{icon}</span>
+            <div>
+              <div style={{ fontSize: '20px', fontWeight: 800, color, lineHeight: 1 }}>{count}</div>
+              <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>{label}</div>
+            </div>
+          </div>
+        ))}
       </div>
 
       {simulatingNode && blastRadiusResult && (
@@ -1710,27 +2179,34 @@ const IdentityHubView = ({ allEntries, onEditEntry }) => {
         </div>
       )}
 
+      {/* Identity Anchors (All accounts with tier + health) */}
       <div>
         <h3 style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: 'var(--space-4)' }}>
-          Identity Anchor Connections ({identityAnchors.length})
+          All Accounts ({allEntries.length})
         </h3>
-        {identityAnchors.length === 0 ? (
+        {allEntries.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '40px 20px', background: 'var(--bg-secondary)', border: '1px dashed var(--border-default)', borderRadius: 'var(--radius-md)' }}>
             <p style={{ color: 'var(--text-secondary)', fontSize: '13px', margin: 0 }}>
-              No identity anchor credentials detected. Save your primary Gmail, Outlook, or Apple ID details to view their recovery mapping.
+              No credentials yet. Add your Gmail, Outlook, Apple ID, and other accounts to visualize your identity ecosystem.
             </p>
           </div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
-            {identityAnchors.map(entry => {
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '16px' }}>
+            {allEntries.map(entry => {
+              const accountType = getAccountType(entry.serviceName);
+              const tierInfo = getTierLabel(accountType?.tier || 3);
+              const { score: strengthScore } = analyzePassword(entry.password || '');
+              const isReused = checkPasswordReuse(entry, allEntries);
+              const healthScore = computeAccountHealthScore(entry, { isReused, strengthScore });
+              const healthDisplay = getHealthScoreDisplay(healthScore);
+              const brandColor = accountType?.brandColor || 'var(--accent-primary)';
+
               const sec2FA = get2FASecurityColor(entry.twoFactorMethod);
               const nodeName = (entry.username || '').toLowerCase().trim();
               const centralityItem = centralityRankings.find(c => c.node === nodeName);
               const blastRadiusVal = centralityItem?.blastRadius || 0;
-              const inDegreeVal = centralityItem?.inDegree || 0;
               const isCriticalHub = centralityItem && (centralityItem.centrality > 0.3 || blastRadiusVal >= 2);
               
-              // Visual styling highlight for simulation
               const isSimAffected = blastRadiusResult?.affectedNodes.includes(nodeName);
               const isSimRoot = simulatingNode === nodeName;
               
@@ -1753,40 +2229,52 @@ const IdentityHubView = ({ allEntries, onEditEntry }) => {
                     background: cardBg,
                     border: cardBorder, 
                     borderRadius: 'var(--radius-md)', 
-                    padding: '16px',
+                    overflow: 'hidden',
                     display: 'flex',
                     flexDirection: 'column',
-                    gap: '12px',
                     transition: 'all 0.3s ease',
                     boxShadow: '0 4px 15px rgba(0,0,0,0.2)'
                   }}
                   className="hover-glow-card"
                 >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <div style={{ width: '28px', height: '28px', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-                        <ServiceLogo name={entry.serviceName} url={entry.url} category={entry.category} size={16} />
+                  {/* Brand color accent bar */}
+                  <div style={{ height: '3px', background: brandColor, opacity: 0.7 }} />
+                  <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+
+                    {/* Header row: logo + name + health score + tier */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div style={{ width: '28px', height: '28px', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                          <ServiceLogo name={entry.serviceName} url={entry.url} category={entry.category} size={16} />
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            {entry.serviceName}
+                            {isCriticalHub && (
+                              <span title="Single Point of Failure: multiple accounts depend on this hub" style={{ fontSize: '11px', cursor: 'help' }}>🎯</span>
+                            )}
+                          </span>
+                          <span style={{ fontSize: '10px', color: 'var(--text-muted)', maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {entry.username || 'No username'}
+                          </span>
+                        </div>
                       </div>
-                      <div style={{ display: 'flex', flexDirection: 'column' }}>
-                        <span style={{ fontSize: '13px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          {entry.serviceName}
-                          {isCriticalHub && (
-                            <span title="Single Point of Failure: multiple accounts depend on this hub" style={{ fontSize: '11px', cursor: 'help' }}>🎯</span>
-                          )}
-                        </span>
-                        <span style={{ fontSize: '10px', color: 'var(--text-muted)', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {entry.username || 'No email username'}
-                        </span>
+                      {/* Health score + tier */}
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', flexShrink: 0 }}>
+                        <div style={{ fontSize: '18px', fontWeight: 800, color: healthDisplay.color, lineHeight: 1 }}>{healthScore}</div>
+                        <span style={{ fontSize: '8px', padding: '1px 6px', borderRadius: '10px', background: tierInfo.bg, color: tierInfo.color, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{tierInfo.label}</span>
                       </div>
                     </div>
+
+                    {/* Action buttons */}
                     <div style={{ display: 'flex', gap: '4px' }}>
                       {nodeName && (
                         <button 
                           className="btn btn-secondary btn-sm" 
                           onClick={() => setSimulatingNode(simulatingNode === nodeName ? null : nodeName)}
-                          style={{ padding: '2px 6px', fontSize: '9px', borderColor: isSimRoot ? 'var(--danger)' : 'var(--border-default)' }}
+                          style={{ padding: '2px 6px', fontSize: '9px', borderColor: isSimRoot ? 'var(--danger)' : 'var(--border-default)', flex: 1 }}
                         >
-                          {isSimRoot ? 'Stop Sim' : 'What if lost?'}
+                          {isSimRoot ? 'Stop Sim' : '💥 Blast Radius'}
                         </button>
                       )}
                       <button 
@@ -1794,65 +2282,69 @@ const IdentityHubView = ({ allEntries, onEditEntry }) => {
                         onClick={() => onEditEntry(entry)}
                         style={{ padding: '2px 8px', fontSize: '10px' }}
                       >
-                        Configure
+                        Edit
                       </button>
                     </div>
-                  </div>
 
-                  {isCriticalHub && (
-                    <div style={{ padding: '8px 10px', background: 'rgba(139, 124, 247, 0.05)', border: '1px solid rgba(139, 124, 247, 0.15)', borderRadius: '4px', fontSize: '10px', color: 'var(--text-secondary)' }}>
-                      <strong>🎯 Critical Recovery Hub:</strong> {blastRadiusVal} downstream account(s) depend on this. 
-                      {entry.twoFactorMethod !== 'hardware' && (
-                        <div style={{ color: 'var(--warning)', marginTop: '4px', fontWeight: 600 }}>
-                          ⚠️ Recommendation: Configure a Hardware Security Key (e.g. YubiKey).
-                        </div>
-                      )}
-                    </div>
-                  )}
+                    {/* Critical hub warning */}
+                    {isCriticalHub && (
+                      <div style={{ padding: '8px 10px', background: 'rgba(139, 124, 247, 0.05)', border: '1px solid rgba(139, 124, 247, 0.15)', borderRadius: '4px', fontSize: '10px', color: 'var(--text-secondary)' }}>
+                        <strong>🎯 Critical Recovery Hub:</strong> {blastRadiusVal} downstream account(s) depend on this. 
+                        {entry.twoFactorMethod !== 'hardware' && (
+                          <div style={{ color: 'var(--warning)', marginTop: '4px', fontWeight: 600 }}>
+                            ⚠️ Recommendation: Configure a Hardware Security Key (e.g. YubiKey).
+                          </div>
+                        )}
+                      </div>
+                    )}
 
-                  <hr style={{ border: 'none', borderTop: '1px solid rgba(255,255,255,0.03)', margin: 0 }} />
+                    <hr style={{ border: 'none', borderTop: '1px solid rgba(255,255,255,0.03)', margin: 0 }} />
 
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '11px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span style={{ color: 'var(--text-muted)' }}>📧 Recovery Email</span>
-                      {entry.recoveryEmail ? (
-                        <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{entry.recoveryEmail}</span>
-                      ) : (
-                        <span style={{ color: 'var(--danger)' }}>⚠️ None configured</span>
-                      )}
+                    {/* Recovery details */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '11px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--text-muted)' }}>📧 Recovery Email</span>
+                        {entry.recoveryEmail ? (
+                          <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{entry.recoveryEmail}</span>
+                        ) : (
+                          <span style={{ color: 'var(--danger)' }}>⚠️ None configured</span>
+                        )}
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--text-muted)' }}>📞 Recovery Phone</span>
+                        {entry.recoveryPhone ? (
+                          <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{entry.recoveryPhone}</span>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }}>Not configured</span>
+                        )}
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ color: 'var(--text-muted)' }}>🛡️ 2FA Method</span>
+                        <span style={{ 
+                          fontSize: '9px', 
+                          padding: '2px 6px', 
+                          borderRadius: '4px', 
+                          color: sec2FA.text, 
+                          background: sec2FA.bg, 
+                          fontWeight: 700 
+                        }}>
+                          {sec2FA.label}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--text-muted)' }}>🔑 Backup Codes</span>
+                        {entry.backupCodes ? (
+                          <span style={{ color: 'var(--success)', fontWeight: 600 }}>Active (Configured)</span>
+                        ) : (
+                          <span style={{ color: 'var(--warning)' }}>⚠️ Missing backup keys</span>
+                        )}
+                      </div>
                     </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span style={{ color: 'var(--text-muted)' }}>📞 Recovery Phone</span>
-                      {entry.recoveryPhone ? (
-                        <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{entry.recoveryPhone}</span>
-                      ) : (
-                        <span style={{ color: 'var(--text-muted)' }}>Not configured</span>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ color: 'var(--text-muted)' }}>🛡️ 2FA Method</span>
-                      <span style={{ 
-                        fontSize: '9px', 
-                        padding: '2px 6px', 
-                        borderRadius: '4px', 
-                        color: sec2FA.text, 
-                        background: sec2FA.bg, 
-                        fontWeight: 700 
-                      }}>
-                        {sec2FA.label}
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span style={{ color: 'var(--text-muted)' }}>🔑 Backup Codes</span>
-                      {entry.backupCodes ? (
-                        <span style={{ color: 'var(--success)', fontWeight: 600 }}>Active (Configured)</span>
-                      ) : (
-                        <span style={{ color: 'var(--warning)' }}>⚠️ Missing backup keys</span>
-                      )}
-                    </div>
+
                   </div>
                 </div>
               );
+
             })}
           </div>
         )}
@@ -2223,44 +2715,51 @@ const extractDomain = (str = '') => {
   return null;
 };
 
-const getServiceLogoUrl = (name = '', url = '') => {
-  let domain = extractDomain(url);
-  
-  if (!domain) {
-    domain = extractDomain(name);
-  }
-  
-  if (!domain && name) {
-    const match = name.toLowerCase().trim();
-    if (match.includes('google')) domain = 'google.com';
-    else if (match.includes('github')) domain = 'github.com';
-    else if (match.includes('microsoft') || match.includes('azure') || match.includes('outlook')) domain = 'microsoft.com';
-    else if (match.includes('netflix')) domain = 'netflix.com';
-    else if (match.includes('spotify')) domain = 'spotify.com';
-    else if (match.includes('amazon')) domain = 'amazon.com';
-    else if (match.includes('zoom')) domain = 'zoom.us';
-    else if (match.includes('facebook')) domain = 'facebook.com';
-    else if (match.includes('twitter') || match.includes(' x ')) domain = 'twitter.com';
-    else if (match.includes('linkedin')) domain = 'linkedin.com';
-  }
-  
-  if (domain && domain !== 'localhost' && domain.includes('.')) {
-    return `https://www.google.com/s2/favicons?sz=128&domain=${domain}`;
-  }
-  return null;
-};
-
 const ServiceLogo = ({ name, url, category, size = 18 }) => {
-  const [imgFailed, setImgFailed] = useState(false);
-  const logoUrl = getServiceLogoUrl(name, url);
+  const [logoSrc, setLogoSrc] = useState('clearbit'); // 'clearbit' | 'google' | 'fallback'
+  const domain = useMemo(() => {
+    let d = extractDomain(url || '');
+    if (!d) d = extractDomain(name || '');
+    if (!d && name) {
+      const match = name.toLowerCase().trim();
+      if (match.includes('google')) d = 'google.com';
+      else if (match.includes('gmail')) d = 'google.com';
+      else if (match.includes('github')) d = 'github.com';
+      else if (match.includes('outlook') || match.includes('microsoft')) d = 'microsoft.com';
+      else if (match.includes('apple')) d = 'apple.com';
+      else if (match.includes('icloud')) d = 'apple.com';
+      else if (match.includes('netflix')) d = 'netflix.com';
+      else if (match.includes('spotify')) d = 'spotify.com';
+      else if (match.includes('amazon')) d = 'amazon.com';
+      else if (match.includes('paypal')) d = 'paypal.com';
+      else if (match.includes('stripe')) d = 'stripe.com';
+      else if (match.includes('linkedin')) d = 'linkedin.com';
+    }
+    return d;
+  }, [name, url]);
 
-  if (logoUrl && !imgFailed) {
+  const src = useMemo(() => {
+    if (!domain || domain === 'localhost' || !domain.includes('.')) return null;
+    if (logoSrc === 'clearbit') return `https://logo.clearbit.com/${domain}`;
+    if (logoSrc === 'google') return `https://www.google.com/s2/favicons?sz=128&domain=${domain}`;
+    return null;
+  }, [domain, logoSrc]);
+
+  const handleImageError = () => {
+    if (logoSrc === 'clearbit') {
+      setLogoSrc('google');
+    } else if (logoSrc === 'google') {
+      setLogoSrc('fallback');
+    }
+  };
+
+  if (src) {
     return (
       <img 
-        src={logoUrl} 
+        src={src} 
         alt={name} 
-        onError={() => setImgFailed(true)} 
-        style={{ width: `${size}px`, height: `${size}px`, borderRadius: '4px', objectFit: 'contain', display: 'block' }}
+        onError={handleImageError} 
+        style={{ width: `${size}px`, height: `${size}px`, borderRadius: '6px', objectFit: 'contain', display: 'block', background: 'transparent' }}
       />
     );
   }
@@ -2279,17 +2778,18 @@ const ServiceLogo = ({ name, url, category, size = 18 }) => {
 
   return (
     <div style={{
-      width: '100%',
-      height: '100%',
+      width: `${size}px`,
+      height: `${size}px`,
+      borderRadius: '6px',
+      background: bg,
+      color: '#ffffff',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      background: bg,
-      color: '#ffffff',
-      fontSize: size <= 14 ? '9px' : '12px',
+      fontSize: `${Math.max(8, size * 0.55)}px`,
       fontWeight: 700,
-      borderRadius: '4px',
-      textShadow: '0 1px 2px rgba(0,0,0,0.2)'
+      textTransform: 'uppercase',
+      flexShrink: 0
     }}>
       {initial}
     </div>

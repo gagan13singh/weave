@@ -346,10 +346,11 @@ const rotateMasterKey = async (userId, { newAuthHash, newSalt, newEncryptedKeyB,
       await tx.vaultEntry.createMany({
         data: encryptedEntries.map((e) => ({
           userId,
-          serviceName: e.serviceName,
-          username: e.username,
           encryptedData: e.encryptedData,
-          category: e.category,
+          iv: e.iv,
+          tag: e.tag,
+          category: e.category || 'general',
+          url: e.url || null,
         })),
       });
     }

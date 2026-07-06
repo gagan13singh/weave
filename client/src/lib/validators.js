@@ -373,3 +373,6 @@ export const parseLocalBotQuery = (query, entries) => {
     matches: []
   };
 };
+
+export { computeAccountHealthScore } from './accountTypes';
+

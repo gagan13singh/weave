@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { parseLocalBotQuery } from '../../lib/validators';
 import useClipboard from '../../hooks/useClipboard';
 import toast from 'react-hot-toast';
 
-export const WeaveBot = ({ entries, onEditEntry }) => {
+export const WeaveBot = ({ entries, onEditEntry, verifyMasterPassword }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [messages, setMessages] = useState([
@@ -14,6 +14,10 @@ export const WeaveBot = ({ entries, onEditEntry }) => {
       timestamp: new Date(),
     },
   ]);
+  // Reprompt gate state
+  const [repromptState, setRepromptState] = useState(null); // null | { password, onVerified, serviceName }
+  const [repromptInput, setRepromptInput] = useState('');
+  const [repromptLoading, setRepromptLoading] = useState(false);
   const { copy } = useClipboard();
   const chatEndRef = useRef(null);
 
@@ -62,8 +66,30 @@ export const WeaveBot = ({ entries, onEditEntry }) => {
   };
 
   const handleCopyPassword = (password, serviceName) => {
-    copy(password);
-    toast.success(`Copied password for ${serviceName}`);
+    // Gate all password copies behind master password reprompt
+    setRepromptState({ password, serviceName });
+    setRepromptInput('');
+  };
+
+  const handleRepromptSubmit = async (e) => {
+    e.preventDefault();
+    if (!repromptState) return;
+    setRepromptLoading(true);
+    try {
+      const ok = await verifyMasterPassword(repromptInput);
+      if (!ok) {
+        toast.error('Incorrect master password');
+        return;
+      }
+      copy(repromptState.password);
+      toast.success(`Copied password for ${repromptState.serviceName}`);
+      setRepromptState(null);
+      setRepromptInput('');
+    } catch {
+      toast.error('Verification failed');
+    } finally {
+      setRepromptLoading(false);
+    }
   };
 
   return (
@@ -135,7 +161,7 @@ export const WeaveBot = ({ entries, onEditEntry }) => {
               <h3 style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>Weave Bot</h3>
               <p style={{ fontSize: '10px', color: 'var(--success)', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '4px' }}>
                 <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--success)', display: 'inline-block' }}></span>
-                100% On-Device AI (Apple Privacy)
+                100% On-Device · Local Rule-Based Search
               </p>
             </div>
             <button
@@ -336,6 +362,29 @@ export const WeaveBot = ({ entries, onEditEntry }) => {
             </button>
           </div>
 
+          {/* Master Password Reprompt Gate */}
+          {repromptState && (
+            <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border-default)', background: 'rgba(239, 68, 68, 0.04)' }}>
+              <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '8px', lineHeight: 1.4 }}>
+                🔐 Enter master password to copy password for <strong>{repromptState.serviceName}</strong>:
+              </p>
+              <form onSubmit={handleRepromptSubmit} style={{ display: 'flex', gap: '6px' }}>
+                <input
+                  type="password"
+                  placeholder="Master password..."
+                  value={repromptInput}
+                  onChange={(e) => setRepromptInput(e.target.value)}
+                  autoFocus
+                  style={{ flex: 1, padding: '5px 10px', background: 'var(--bg-input)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', fontSize: '12px', outline: 'none' }}
+                />
+                <button type="submit" className="btn btn-primary" style={{ padding: '5px 10px', fontSize: '10px', height: '28px' }} disabled={repromptLoading || !repromptInput}>
+                  {repromptLoading ? '...' : 'Verify'}
+                </button>
+                <button type="button" className="btn btn-ghost" style={{ padding: '5px 8px', fontSize: '10px', height: '28px' }} onClick={() => { setRepromptState(null); setRepromptInput(''); }}>✕</button>
+              </form>
+            </div>
+          )}
+
           {/* Footer Input Form */}
           <form
             onSubmit={(e) => {
@@ -407,44 +456,51 @@ const extractDomain = (str = '') => {
   return null;
 };
 
-const getServiceLogoUrl = (name = '', url = '') => {
-  let domain = extractDomain(url);
-  
-  if (!domain) {
-    domain = extractDomain(name);
-  }
-  
-  if (!domain && name) {
-    const match = name.toLowerCase().trim();
-    if (match.includes('google')) domain = 'google.com';
-    else if (match.includes('github')) domain = 'github.com';
-    else if (match.includes('microsoft') || match.includes('azure') || match.includes('outlook')) domain = 'microsoft.com';
-    else if (match.includes('netflix')) domain = 'netflix.com';
-    else if (match.includes('spotify')) domain = 'spotify.com';
-    else if (match.includes('amazon')) domain = 'amazon.com';
-    else if (match.includes('zoom')) domain = 'zoom.us';
-    else if (match.includes('facebook')) domain = 'facebook.com';
-    else if (match.includes('twitter') || match.includes(' x ')) domain = 'twitter.com';
-    else if (match.includes('linkedin')) domain = 'linkedin.com';
-  }
-  
-  if (domain && domain !== 'localhost' && domain.includes('.')) {
-    return `https://www.google.com/s2/favicons?sz=128&domain=${domain}`;
-  }
-  return null;
-};
-
 const ServiceLogo = ({ name, url, category, size = 18 }) => {
-  const [imgFailed, setImgFailed] = useState(false);
-  const logoUrl = getServiceLogoUrl(name, url);
+  const [logoSrc, setLogoSrc] = useState('clearbit'); // 'clearbit' | 'google' | 'fallback'
+  const domain = useMemo(() => {
+    let d = extractDomain(url || '');
+    if (!d) d = extractDomain(name || '');
+    if (!d && name) {
+      const match = name.toLowerCase().trim();
+      if (match.includes('google')) d = 'google.com';
+      else if (match.includes('gmail')) d = 'google.com';
+      else if (match.includes('github')) d = 'github.com';
+      else if (match.includes('outlook') || match.includes('microsoft')) d = 'microsoft.com';
+      else if (match.includes('apple')) d = 'apple.com';
+      else if (match.includes('icloud')) d = 'apple.com';
+      else if (match.includes('netflix')) d = 'netflix.com';
+      else if (match.includes('spotify')) d = 'spotify.com';
+      else if (match.includes('amazon')) d = 'amazon.com';
+      else if (match.includes('paypal')) d = 'paypal.com';
+      else if (match.includes('stripe')) d = 'stripe.com';
+      else if (match.includes('linkedin')) d = 'linkedin.com';
+    }
+    return d;
+  }, [name, url]);
 
-  if (logoUrl && !imgFailed) {
+  const src = useMemo(() => {
+    if (!domain || domain === 'localhost' || !domain.includes('.')) return null;
+    if (logoSrc === 'clearbit') return `https://logo.clearbit.com/${domain}`;
+    if (logoSrc === 'google') return `https://www.google.com/s2/favicons?sz=128&domain=${domain}`;
+    return null;
+  }, [domain, logoSrc]);
+
+  const handleImageError = () => {
+    if (logoSrc === 'clearbit') {
+      setLogoSrc('google');
+    } else if (logoSrc === 'google') {
+      setLogoSrc('fallback');
+    }
+  };
+
+  if (src) {
     return (
       <img 
-        src={logoUrl} 
+        src={src} 
         alt={name} 
-        onError={() => setImgFailed(true)} 
-        style={{ width: `${size}px`, height: `${size}px`, borderRadius: '4px', objectFit: 'contain', display: 'block' }}
+        onError={handleImageError} 
+        style={{ width: `${size}px`, height: `${size}px`, borderRadius: '6px', objectFit: 'contain', display: 'block', background: 'transparent' }}
       />
     );
   }
@@ -463,17 +519,18 @@ const ServiceLogo = ({ name, url, category, size = 18 }) => {
 
   return (
     <div style={{
-      width: '100%',
-      height: '100%',
+      width: `${size}px`,
+      height: `${size}px`,
+      borderRadius: '6px',
+      background: bg,
+      color: '#ffffff',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      background: bg,
-      color: '#ffffff',
-      fontSize: size <= 14 ? '9px' : '12px',
+      fontSize: `${Math.max(8, size * 0.55)}px`,
       fontWeight: 700,
-      borderRadius: '4px',
-      textShadow: '0 1px 2px rgba(0,0,0,0.2)'
+      textTransform: 'uppercase',
+      flexShrink: 0
     }}>
       {initial}
     </div>

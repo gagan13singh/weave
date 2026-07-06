@@ -36,6 +36,11 @@ const Settings = () => {
   const [rotationRecoveryKey, setRotationRecoveryKey] = useState('');
   const [regenerateLoading, setRegenerateLoading] = useState(false);
   const [regenerateRecoveryKeyVal, setRegenerateRecoveryKeyVal] = useState('');
+  // Inline password for recovery-key regeneration (replaces prompt())
+  const [regenPassword, setRegenPassword] = useState('');
+  const [showRegenForm, setShowRegenForm] = useState(false);
+  // CSV export warning dialog
+  const [showExportWarning, setShowExportWarning] = useState(false);
 
   const handle2FASetup = async () => {
     setLoading(true);
@@ -129,15 +134,16 @@ const Settings = () => {
       // 2. Derive current Key B to decrypt entries
       const { keyB: currentKeyB } = await deriveKeys(currentPassword, saltData.salt);
 
-      // 3. Decrypt all entries locally
+      // 3. Decrypt all entries locally using the separate iv/tag fields from VaultContext
       const decryptedEntries = [];
       for (const entry of allEntries) {
         try {
-          const parsed = JSON.parse(entry.encryptedData);
-          const plaintext = await decrypt(parsed.ciphertext, parsed.iv, parsed.tag, currentKeyB);
-          decryptedEntries.push({ ...entry, plaintext });
+          // VaultContext stores raw entries with entry.encryptedData, entry.iv, entry.tag as top-level hex strings
+          // We need the raw entries from the vault, which have the correct structure
+          // allEntries are already decrypted by VaultContext — re-encrypt them directly
+          decryptedEntries.push(entry);
         } catch (err) {
-          throw new Error('Current master password incorrect or decryption failed.');
+          throw new Error('Failed to process vault entries.');
         }
       }
 
@@ -147,14 +153,19 @@ const Settings = () => {
       const newAuthHash = await hashKeyA(newKeyA);
 
       // 5. Re-encrypt all entries under newKeyB
+      // allEntries from VaultContext are the decrypted plaintext objects — re-encrypt them
       const reEncryptedEntries = [];
       for (const entry of decryptedEntries) {
-        const encrypted = await encrypt(entry.plaintext, newKeyB);
+        // Strip metadata, keep only plaintext fields for encryption
+        const { id, createdAt, updatedAt, userId, category, url, _decryptionFailed, ...plaintextData } = entry;
+        if (_decryptionFailed) continue; // Skip entries that couldn't be decrypted
+        const { ciphertext, iv: newIv, tag: newTag } = await encrypt(plaintextData, newKeyB);
         reEncryptedEntries.push({
-          serviceName: entry.serviceName,
-          username: entry.username,
-          category: entry.category,
-          encryptedData: JSON.stringify(encrypted),
+          encryptedData: ciphertext,
+          iv: newIv,
+          tag: newTag,
+          category: category || 'general',
+          url: url || null,
         });
       }
 
@@ -183,14 +194,14 @@ const Settings = () => {
     }
   };
 
-  const handleRegenerateRecovery = async () => {
-    const password = prompt('Please enter your master password to verify:');
-    if (!password) return;
+  const handleRegenerateRecovery = async (e) => {
+    e.preventDefault();
+    if (!regenPassword) return;
 
     setRegenerateLoading(true);
     try {
       const { data: saltData } = await api.get('/auth/salt', { params: { email: user.email } });
-      const { keyBBytes } = await deriveKeysWithRaw(password, saltData.salt);
+      const { keyBBytes } = await deriveKeysWithRaw(regenPassword, saltData.salt);
 
       const newRecKey = generateRecoveryKey();
       const { encryptedKeyB: newEncKeyB, recoveryIv: newRecIv } = await encryptKeyBBytesForRecovery(keyBBytes, newRecKey);
@@ -199,6 +210,8 @@ const Settings = () => {
       await api.post('/auth/regenerate-recovery', { newEncryptedKeyB });
 
       setRegenerateRecoveryKeyVal(newRecKey);
+      setRegenPassword('');
+      setShowRegenForm(false);
       toast.success('Recovery key regenerated successfully! Save this new key.');
     } catch (err) {
       toast.error('Failed to regenerate recovery key. Please check your password.');
@@ -307,7 +320,7 @@ const Settings = () => {
     reader.readAsText(file);
   };
 
-  const handleExportCsv = () => {
+  const doExportCsv = () => {
     try {
       const headers = ['name', 'url', 'username', 'password', 'notes', 'category'];
       const csvRows = [headers.join(',')];
@@ -328,12 +341,13 @@ const Settings = () => {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.setAttribute('href', url);
-      link.setAttribute('download', `weave_vault_export.csv`);
+      link.setAttribute('download', `weave_vault_export_UNENCRYPTED_${new Date().toISOString().split('T')[0]}.csv`);
       link.style.visibility = 'hidden';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      toast.success('Vault exported to CSV successfully!');
+      setShowExportWarning(false);
+      toast.success('Vault exported. Store this file securely — it contains plaintext passwords.');
     } catch (err) {
       toast.error('Failed to export vault');
     }
@@ -596,9 +610,32 @@ const Settings = () => {
                   📋 Copy Key
                 </button>
               </div>
+            ) : showRegenForm ? (
+              <form onSubmit={handleRegenerateRecovery} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', marginTop: 'var(--space-3)', maxWidth: 360 }}>
+                <div className="form-field">
+                  <label className="form-label">Master Password (to verify identity)</label>
+                  <input
+                    type="password"
+                    className="form-input"
+                    placeholder="Enter your master password"
+                    value={regenPassword}
+                    onChange={(e) => setRegenPassword(e.target.value)}
+                    autoFocus
+                    required
+                  />
+                </div>
+                <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                  <button type="submit" className="btn btn-primary btn-sm" disabled={regenerateLoading || !regenPassword}>
+                    {regenerateLoading ? 'Generating...' : 'Generate New Key'}
+                  </button>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => { setShowRegenForm(false); setRegenPassword(''); }}>
+                    Cancel
+                  </button>
+                </div>
+              </form>
             ) : (
-              <button className="btn btn-secondary" onClick={handleRegenerateRecovery} disabled={regenerateLoading} style={{ marginTop: 'var(--space-2)' }}>
-                {regenerateLoading ? 'Generating...' : 'Generate New Recovery Key'}
+              <button className="btn btn-secondary" onClick={() => setShowRegenForm(true)} style={{ marginTop: 'var(--space-2)' }}>
+                Generate New Recovery Key
               </button>
             )}
           </div>
@@ -620,8 +657,8 @@ const Settings = () => {
                   style={{ display: 'none' }} 
                 />
               </label>
-              <button className="btn btn-secondary" onClick={handleExportCsv} disabled={allEntries.length === 0}>
-                💾 Export Vault to CSV
+              <button className="btn btn-secondary" onClick={() => setShowExportWarning(true)} disabled={allEntries.length === 0} style={{ borderColor: 'rgba(251,191,36,0.3)', color: 'var(--warning)' }}>
+                ⚠️ Export Vault (Plaintext CSV)
               </button>
             </div>
           </div>
@@ -643,6 +680,32 @@ const Settings = () => {
           </div>
         </div>
       </main>
+
+      {/* CSV Export Warning Dialog */}
+      {showExportWarning && (
+        <div className="modal-overlay" style={{ zIndex: 1200 }}>
+          <div className="modal-content animate-scale-in" style={{ maxWidth: 420, border: '1px solid rgba(251,191,36,0.4)', background: 'var(--bg-secondary)' }}>
+            <div className="modal-header">
+              <h2 className="modal-title" style={{ color: 'var(--warning)' }}>⚠️ Plaintext Export Warning</h2>
+              <button className="modal-close" onClick={() => setShowExportWarning(false)}>✕</button>
+            </div>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+              <div style={{ padding: '14px 16px', background: 'rgba(251,191,36,0.06)', border: '1px solid rgba(251,191,36,0.2)', borderRadius: 'var(--radius-md)' }}>
+                <p style={{ fontSize: '13px', color: 'var(--text-primary)', lineHeight: 1.6, margin: 0 }}>
+                  <strong>This will create an UNENCRYPTED file</strong> containing all your passwords in plaintext. Anyone who obtains this file — through email, cloud sync, screen recording, or physical access — can read every password.
+                </p>
+              </div>
+              <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                Weave's entire security model is zero-knowledge. This export permanently breaks that guarantee for the exported copy. Only proceed if you need to migrate to another password manager or create a secure offline backup.
+              </p>
+              <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+                <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setShowExportWarning(false)}>Cancel</button>
+                <button className="btn btn-danger" style={{ flex: 1 }} onClick={doExportCsv}>I Understand — Export Anyway</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
