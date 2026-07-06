@@ -8,7 +8,7 @@ import { buildRecoveryGraph, blastRadiusBFS, computeDegreeCentrality, generatePa
 import { semanticSearch } from '../lib/nlSearch';
 import { encryptVaultForTransfer, decryptVaultTransfer, generateTransferPIN } from '../lib/vaultTransfer';
 import { getAccountType, getTierLabel, computeAccountHealthScore, getHealthScoreDisplay, ACCOUNT_TYPES } from '../lib/accountTypes';
-import { checkPasswordBreach } from '../lib/hibp';
+import { checkPasswordBreach, getCachedBreachCount } from '../lib/hibp';
 import QRCode from 'qrcode';
 import toast from 'react-hot-toast';
 import { WeaveBot } from '../components/ui/WeaveBot';
@@ -1057,31 +1057,29 @@ const VaultFormModal = ({ entry, allEntries, onSave, onClose }) => {
 const PasswordStrengthInline = ({ password, allEntries, entryId }) => {
   if (!password) return null;
 
-  const [breachCount, setBreachCount] = useState(null);
+  const cachedCount = getCachedBreachCount(password);
+  const [breachCount, setBreachCount] = useState(cachedCount);
   const [checking, setChecking] = useState(false);
 
   const strength = analyzePassword(password);
   const reuse = checkPasswordReuse(password, allEntries, entryId);
 
   useEffect(() => {
-    let active = true;
-    const runCheck = async () => {
-      setChecking(true);
-      setBreachCount(null);
-      try {
-        const count = await checkPasswordBreach(password);
-        if (active) {
-          setBreachCount(count);
-        }
-      } catch (err) {
-        console.error(err);
-      } finally {
-        if (active) setChecking(false);
-      }
-    };
-    runCheck();
-    return () => { active = false; };
+    setBreachCount(getCachedBreachCount(password));
   }, [password]);
+
+  const handleManualCheck = async (e) => {
+    e.stopPropagation();
+    setChecking(true);
+    try {
+      const count = await checkPasswordBreach(password);
+      setBreachCount(count);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setChecking(false);
+    }
+  };
 
   return (
     <div style={{ marginTop: 'var(--space-3)', display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)', alignItems: 'center' }}>
@@ -1104,17 +1102,35 @@ const PasswordStrengthInline = ({ password, allEntries, entryId }) => {
       )}
       {checking && (
         <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-          <div className="spinner" style={{ width: '10px', height: '10px', borderWidth: '1px', borderTopColor: 'var(--text-muted)' }} /> Checking breaches...
+          <div className="spinner" style={{ width: '10px', height: '10px', borderWidth: '1px', borderTopColor: 'var(--text-muted)' }} /> Checking...
         </span>
+      )}
+      {!checking && breachCount === null && (
+        <button
+          onClick={handleManualCheck}
+          className="btn btn-ghost btn-sm"
+          style={{
+            fontSize: '10px',
+            padding: '2px 8px',
+            borderRadius: 'var(--radius-full)',
+            background: 'var(--bg-input)',
+            border: '1px solid var(--border-default)',
+            color: 'var(--text-secondary)',
+            fontWeight: 500,
+            cursor: 'pointer'
+          }}
+        >
+          🔍 Check leak database
+        </button>
       )}
       {!checking && breachCount === 0 && (
         <span style={{ fontSize: 'var(--text-xs)', color: 'var(--success)', background: 'rgba(16,185,129,0.08)', padding: '2px 8px', borderRadius: 'var(--radius-full)', fontWeight: 600 }}>
-          🛡️ Clean (0 Breaches)
+          🛡️ 0 leak matches in database
         </span>
       )}
       {!checking && breachCount > 0 && (
         <span style={{ fontSize: 'var(--text-xs)', color: 'var(--danger)', background: 'rgba(239,68,68,0.1)', padding: '2px 8px', borderRadius: 'var(--radius-full)', fontWeight: 700 }}>
-          🚨 Exposed in {breachCount} leaks!
+          🚨 Found in {breachCount} public leaks!
         </span>
       )}
     </div>
@@ -1213,10 +1229,10 @@ const parseCSV = (csvText) => {
   // Parse headers to find indexes
   const headers = lines[0].split(',').map(h => h.replace(/^["']|["']$/g, '').toLowerCase().trim());
   
-  let nameIdx = headers.findIndex(h => h.includes('name') || h.includes('title') || h.includes('service') || h.includes('login') || h.includes('label'));
-  let urlIdx = headers.findIndex(h => h.includes('url') || h.includes('website') || h.includes('link'));
-  let userIdx = headers.findIndex(h => h.includes('user') || h.includes('email') || h.includes('login_name') || h.includes('username'));
-  let passIdx = headers.findIndex(h => h.includes('pass') || h.includes('secret') || h.includes('code') || h.includes('password'));
+  let nameIdx = headers.findIndex(h => ['name', 'title', 'label', 'service_name', 'service'].some(keyword => h === keyword || h.includes(keyword)));
+  let urlIdx = headers.findIndex(h => ['url', 'website', 'link', 'login_uri', 'uri'].some(keyword => h === keyword || h.includes(keyword)));
+  let userIdx = headers.findIndex(h => ['username', 'email', 'login_username', 'user', 'login_name'].some(keyword => h === keyword || h.includes(keyword)));
+  let passIdx = headers.findIndex(h => ['password', 'secret', 'login_password', 'pass', 'code'].some(keyword => h === keyword || h.includes(keyword)));
 
   // Fallbacks if headers are missing/not recognized
   if (nameIdx === -1) nameIdx = 0;
@@ -1453,6 +1469,17 @@ const SmartImportModal = ({ isOpen, onClose, allEntries, createEntry }) => {
               <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', lineHeight: 1.5, margin: 0 }}>
                 Upload or paste a <strong>.csv</strong> export from Google Chrome, Safari, 1Password, or Bitwarden. We will parse it securely on your device.
               </p>
+
+              <details style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', textAlign: 'left' }}>
+                <summary style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', cursor: 'pointer', outline: 'none' }}>
+                  💡 How do I export my passwords?
+                </summary>
+                <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '8px', lineHeight: 1.5 }}>
+                  <p style={{ margin: '0 0 6px 0' }}><strong>Google Chrome:</strong> Go to Settings → Autofill and passwords → Password Manager → Settings → Export passwords (.csv).</p>
+                  <p style={{ margin: '0 0 6px 0' }}><strong>Apple Safari:</strong> Go to Settings → Passwords → Click (...) icon → Export Passwords...</p>
+                  <p style={{ margin: '0' }}><strong>Bitwarden / 1Password:</strong> Open your vault → Settings → Export Vault → Select File Format as .csv.</p>
+                </div>
+              </details>
               
               <div style={{ border: '2px dashed var(--border-default)', padding: '16px', borderRadius: 'var(--radius-md)', textAlign: 'center', background: 'rgba(255,255,255,0.01)', position: 'relative' }}>
                 <input 
@@ -1640,8 +1667,10 @@ const SmartImportModal = ({ isOpen, onClose, allEntries, createEntry }) => {
 
 const PasswordCheckupView = ({ allEntries, onEditEntry, updateEntry, deleteEntry, requestReprompt }) => {
   const [mergingAll, setMergingAll] = useState(false);
+  const [scanStatus, setScanStatus] = useState('idle'); // 'idle' | 'scanning' | 'done'
+  const [scanProgress, setScanProgress] = useState(0);
 
-  // 1. Weak passwords: length < 8 or zxcvbn strength score < 3
+  // 1. Weak passwords: zxcvbn strength score < 3
   const weakEntries = allEntries.filter(entry => {
     if (!entry.password) return false;
     const strength = analyzePassword(entry.password);
@@ -1674,11 +1703,62 @@ const PasswordCheckupView = ({ allEntries, onEditEntry, updateEntry, deleteEntry
   const duplicateGroups = Object.values(uniqueGroups).filter(grp => grp.length > 1);
   const totalDuplicatesCount = duplicateGroups.reduce((acc, grp) => acc + grp.length - 1, 0);
 
+  // 4. Breached passwords
+  const breachedEntries = allEntries.filter(entry => {
+    if (!entry.password) return false;
+    const count = getCachedBreachCount(entry.password);
+    return count !== null && count > 0;
+  });
+
+  const breachedCount = breachedEntries.length;
   const reusedCount = Object.values(reusedGroups).reduce((acc, grp) => acc + grp.length, 0);
   const weakCount = weakEntries.length;
   const similarCount = similarPairs.length;
   const totalCount = allEntries.length;
-  const healthyCount = totalCount - (weakCount + totalDuplicatesCount + similarCount);
+  const healthyCount = totalCount - (weakCount + totalDuplicatesCount + similarCount + breachedCount);
+
+  const handleScanBreaches = async () => {
+    const uniquePasswords = Array.from(new Set(allEntries.map(e => e.password).filter(Boolean)));
+    const toScan = uniquePasswords.filter(p => getCachedBreachCount(p) === null);
+    
+    setScanStatus('scanning');
+    setScanProgress(0);
+    
+    let completed = 0;
+    const total = toScan.length;
+    
+    if (total === 0) {
+      setScanStatus('done');
+      setScanProgress(100);
+      toast.success('All passwords scanned successfully!');
+      return;
+    }
+
+    const chunkArray = (arr, size) => {
+      const chunks = [];
+      for (let i = 0; i < arr.length; i += size) {
+        chunks.push(arr.slice(i, i + size));
+      }
+      return chunks;
+    };
+
+    const chunks = chunkArray(toScan, 3);
+    for (const chunk of chunks) {
+      await Promise.all(chunk.map(async (password) => {
+        try {
+          await checkPasswordBreach(password);
+        } catch (e) {
+          console.error('Breach scan failed for password:', e);
+        }
+      }));
+      completed += chunk.length;
+      setScanProgress(Math.round((completed / total) * 100));
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    setScanStatus('done');
+    toast.success('Password breach checkup complete!');
+  };
 
   const handleMerge = async (latest, entry) => {
     const mergedNotes = `${latest.notes || ''} ${entry.notes ? `| Old notes: ${entry.notes}` : ''}`.trim();
@@ -1703,7 +1783,6 @@ const PasswordCheckupView = ({ allEntries, onEditEntry, updateEntry, deleteEntry
             const sorted = [...grp].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
             const latest = sorted[0];
             const outdated = sorted.slice(1);
-
             let mergedNotes = latest.notes || '';
             outdated.forEach(o => {
               if (o.notes) {
@@ -1752,8 +1831,49 @@ const PasswordCheckupView = ({ allEntries, onEditEntry, updateEntry, deleteEntry
         )}
       </div>
 
+      {/* Breach scanner control */}
+      <div style={{
+        padding: '16px 20px',
+        background: 'var(--bg-secondary)',
+        border: '1px solid var(--border-default)',
+        borderRadius: 'var(--radius-md)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: '12px'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <span style={{ fontSize: '20px' }}>🚨</span>
+          <div style={{ textAlign: 'left' }}>
+            <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>Password Leak Database Scan</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+              Compare all unique vault passwords against millions of leaked credentials using secure k-Anonymity (SHA-1 hashing).
+            </div>
+          </div>
+        </div>
+        <div>
+          {scanStatus === 'idle' && (
+            <button className="btn btn-secondary btn-sm" onClick={handleScanBreaches} style={{ padding: '8px 14px' }}>
+              🔍 Scan Vault for Leaks
+            </button>
+          )}
+          {scanStatus === 'scanning' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div className="spinner" style={{ width: '12px', height: '12px' }} />
+              <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Scanning ({scanProgress}%)</span>
+            </div>
+          )}
+          {scanStatus === 'done' && (
+            <button className="btn btn-ghost btn-sm" onClick={handleScanBreaches} style={{ padding: '8px 14px', background: 'rgba(255,255,255,0.02)' }}>
+              🔄 Re-scan Vault
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Summary Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--space-4)' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 'var(--space-4)' }}>
         <div style={{ padding: '16px 8px', background: 'var(--bg-secondary)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', textAlign: 'center' }}>
           <p style={{ fontSize: '20px', fontWeight: 700, color: 'var(--danger)', margin: '0 0 4px 0' }}>{totalDuplicatesCount}</p>
           <p style={{ fontSize: '9px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', margin: 0 }}>Duplicates</p>
@@ -1765,6 +1885,10 @@ const PasswordCheckupView = ({ allEntries, onEditEntry, updateEntry, deleteEntry
         <div style={{ padding: '16px 8px', background: 'var(--bg-secondary)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', textAlign: 'center' }}>
           <p style={{ fontSize: '20px', fontWeight: 700, color: '#f59e0b', margin: '0 0 4px 0' }}>{similarCount}</p>
           <p style={{ fontSize: '9px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', margin: 0 }}>Pattern Reuse</p>
+        </div>
+        <div style={{ padding: '16px 8px', background: 'var(--bg-secondary)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', textAlign: 'center' }}>
+          <p style={{ fontSize: '20px', fontWeight: 700, color: '#ff4757', margin: '0 0 4px 0' }}>{breachedCount}</p>
+          <p style={{ fontSize: '9px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', margin: 0 }}>Breached</p>
         </div>
         <div style={{ padding: '16px 8px', background: 'var(--bg-secondary)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)', textAlign: 'center' }}>
           <p style={{ fontSize: '20px', fontWeight: 700, color: 'var(--success)', margin: '0 0 4px 0' }}>{healthyCount > 0 ? healthyCount : 0}</p>
@@ -1979,15 +2103,91 @@ const PasswordCheckupView = ({ allEntries, onEditEntry, updateEntry, deleteEntry
         </div>
       )}
 
-      {weakCount === 0 && totalDuplicatesCount === 0 && (
+      {breachedCount > 0 && (
+        <div>
+          <h3 style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: 'var(--space-3)', display: 'flex', alignItems: 'center', gap: '8px', marginTop: 'var(--space-2)' }}>
+            <span>🚨</span> Passwords Found in Leaks
+          </h3>
+          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: '-6px 0 12px 0', lineHeight: 1.4 }}>
+            These password strings were matched against public databases of leaked credentials. You should change them immediately to avoid stuffing attacks.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {breachedEntries.map(entry => {
+              const leakCount = getCachedBreachCount(entry.password);
+              return (
+                <div 
+                  key={entry.id}
+                  style={{ 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'space-between',
+                    padding: '14px 16px',
+                    background: 'rgba(255, 71, 87, 0.02)', 
+                    border: '1px solid rgba(255, 71, 87, 0.1)', 
+                    borderRadius: 'var(--radius-md)'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ width: '28px', height: '28px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-default)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                      <ServiceLogo name={entry.serviceName} url={entry.url} category={entry.category} size={16} />
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      <span style={{ fontSize: '13px', fontWeight: 600 }}>{entry.serviceName}</span>
+                      <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>{entry.username || 'No email/username'}</span>
+                    </div>
+                    <span className="category-badge" style={{ color: 'var(--danger)', background: 'rgba(255, 71, 87, 0.08)', borderColor: 'rgba(255, 71, 87, 0.15)', fontSize: '9px', padding: '1px 6px' }}>
+                      Exposed {leakCount} times
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <button 
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => onEditEntry(entry)}
+                      style={{ padding: '4px 10px', fontSize: '10px' }}
+                    >
+                      Change Password
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {weakCount === 0 && totalDuplicatesCount === 0 && breachedCount === 0 && (
         <div style={{ textAlign: 'center', padding: '60px 20px', background: 'var(--bg-secondary)', border: '1px dashed var(--border-default)', borderRadius: 'var(--radius-lg)' }}>
           <span style={{ fontSize: '48px', display: 'block', marginBottom: '16px' }}>🛡️</span>
           <h3 style={{ fontSize: '16px', fontWeight: 700, color: 'var(--success)', marginBottom: '8px' }}>Your Vault is 100% Healthy!</h3>
           <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', margin: 0 }}>
-            No weak, reused, or duplicate passwords were found. Awesome job securing your digital life!
+            No weak, reused, duplicate, or breached passwords were found. Awesome job securing your digital life!
           </p>
         </div>
       )}
+
+      {/* Zero-Knowledge Security Notice regarding Email/Account Monitoring */}
+      <div style={{
+        marginTop: 'var(--space-8)',
+        padding: '16px 20px',
+        background: 'rgba(139, 124, 247, 0.02)',
+        border: '1px solid rgba(139, 124, 247, 0.12)',
+        borderRadius: 'var(--radius-md)',
+        fontSize: '11px',
+        color: 'var(--text-secondary)',
+        lineHeight: 1.6,
+        textAlign: 'left'
+      }}>
+        <div style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--accent-primary)', marginBottom: '8px', fontSize: '12px' }}>
+          🔒 Weave's Zero-Knowledge Policy & Account Breach Monitoring
+        </div>
+        <p style={{ margin: '0 0 8px 0' }}>
+          <strong>Why doesn't Weave automatically monitor your email addresses for database breaches?</strong> 
+          Standard email/account breach monitoring requires querying third-party APIs (like Have I Been Pwned) with your raw, identifiable email addresses. Sending your usernames or recovery emails to external databases breaks Weave's strict zero-knowledge security standard, potentially exposing which services you own to third-party observers.
+        </p>
+        <p style={{ margin: 0 }}>
+          For absolute metadata privacy, we recommend manually checking your email addresses directly at <a href="https://haveibeenpwned.com" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-primary)', textDecoration: 'underline' }}>Have I Been Pwned</a>. Weave only performs local k-Anonymity checks of your password <em>strings</em>, meaning your password hashes are never exposed to the network.
+        </p>
+      </div>
     </div>
   );
 };

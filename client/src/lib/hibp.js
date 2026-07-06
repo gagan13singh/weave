@@ -1,4 +1,4 @@
-﻿/**
+/**
  * hibp.js
  *
  * Client-side Have I Been Pwned (HIBP) checker using k-Anonymity.
@@ -13,8 +13,13 @@ async function sha1(str) {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
 }
 
+const breachCache = new Map();
+
 export async function checkPasswordBreach(password) {
   if (!password) return 0;
+  if (breachCache.has(password)) {
+    return breachCache.get(password);
+  }
   
   try {
     const hash = await sha1(password);
@@ -32,13 +37,21 @@ export async function checkPasswordBreach(password) {
     for (const line of lines) {
       const [lineSuffix, countStr] = line.trim().split(':');
       if (lineSuffix === suffix) {
-        return parseInt(countStr, 10);
+        const count = parseInt(countStr, 10);
+        breachCache.set(password, count);
+        return count;
       }
     }
 
+    breachCache.set(password, 0);
     return 0;
   } catch (error) {
     console.error('Error checking password breach:', error);
     return 0;
   }
+}
+
+export function getCachedBreachCount(password) {
+  if (!password) return null;
+  return breachCache.has(password) ? breachCache.get(password) : null;
 }

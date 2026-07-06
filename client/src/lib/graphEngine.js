@@ -11,6 +11,8 @@
  * - Panic mode prioritized breach response plan
  */
 
+import { getCachedBreachCount } from './hibp';
+
 /**
  * Build a directed graph from vault entries' recovery relationships.
  * 
@@ -186,6 +188,9 @@ export const generatePanicPlan = (entries, graph) => {
     const isBanking = entry.category === 'banking';
     const isHub = centrality > 0.3 || blastRadius >= 2;
 
+    const cachedBreaches = getCachedBreachCount(entry.password) || 0;
+    const isBreached = cachedBreaches > 0;
+
     let score = 0;
     let priority = 'low';
     let reason = '';
@@ -193,7 +198,16 @@ export const generatePanicPlan = (entries, graph) => {
     if (isHub) {
       score = 100 + blastRadius * 10;
       priority = 'critical';
-      reason = `Hub account — ${blastRadius} other accounts depend on this for recovery`;
+      if (isBreached) {
+        score += 30;
+        reason = `Critical Hub and Leaked password (${cachedBreaches} times) — extreme compromise risk!`;
+      } else {
+        reason = `Hub account — ${blastRadius} other accounts depend on this for recovery`;
+      }
+    } else if (isBreached) {
+      score = 90;
+      priority = 'critical';
+      reason = `Password leaked ${cachedBreaches} times in public databases — rotate immediately!`;
     } else if (isBanking) {
       score = 80;
       priority = 'high';
@@ -212,7 +226,7 @@ export const generatePanicPlan = (entries, graph) => {
       reason = 'Isolated account with no downstream dependencies';
     }
 
-    return { entry, priority, reason, score, has2FA, blastRadius };
+    return { entry, priority, reason, score, has2FA, blastRadius, isBreached };
   });
 
   plan.sort((a, b) => b.score - a.score);
